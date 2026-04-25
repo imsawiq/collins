@@ -1,5 +1,22 @@
 language: en
 
+video:
+  # EN: Default max YouTube quality for newly created screens.
+  #     Use 0 for auto, or one of: 360, 480, 720, 1080, 1440, 2160.
+  # RU: Стандартное максимальное качество YouTube для новых экранов.
+  #     Используй 0 для auto, либо одно из: 360, 480, 720, 1080, 1440, 2160.
+  defaultYouTubeQuality: 720
+
+  # EN: How often the server checks for ended videos and loop/playlist transitions.
+  # RU: Как часто сервер проверяет окончание видео и переходы loop/playlist.
+  endCheckIntervalTicks: 10
+
+  # EN: How often the server re-broadcasts sync while something is playing.
+  #     Lower values keep clients tighter in sync.
+  # RU: Как часто сервер заново шлёт sync пока что-то воспроизводится.
+  #     Меньше значение = меньше рассинхрон у клиентов.
+  syncBroadcastIntervalTicks: 20
+
 # EN: Security settings for /collins admin commands and URLs.
 # RU: Настройки безопасности для админ-команд /collins и URL.
 security:

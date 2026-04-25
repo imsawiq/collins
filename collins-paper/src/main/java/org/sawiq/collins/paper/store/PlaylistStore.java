@@ -23,6 +23,8 @@ public final class PlaylistStore {
     }
 
     public void load() {
+        Playlist.clearAll();
+
         if (!file.exists()) {
             plugin.getLogger().info("No playlists.yml found, starting with empty playlists");
             return;

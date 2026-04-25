@@ -32,37 +32,52 @@ public final class VideoHudOverlay {
         int sh = client.getWindow().getScaledHeight();
         int y = sh - 59;
 
-        // Проверяем идёт ли скачивание
         if (screen.isDownloading()) {
-            int pct = screen.getDownloadPercent();
-            long dlMb = screen.getDownloadedMb();
-            long totalMb = screen.getDownloadTotalMb();
-            String text;
-            if (totalMb > 0) {
-                text = "§eСкачивание видео... " + dlMb + " МБ / " + totalMb + " МБ (" + pct + "%)";
+            int pct = Math.max(0, screen.getDownloadPercent());
+            long dlMb = Math.max(0L, screen.getDownloadedMb());
+            long totalMb = Math.max(0L, screen.getDownloadTotalMb());
+            Text text;
+            if (screen.isDownloadingYtdlp()) {
+                text = Text.translatable("text.collins.youtube.installing_progress", pct);
+            } else if (screen.isDownloadingYoutubeVideo() && totalMb > 0) {
+                text = Text.translatable("text.collins.youtube.download.progress_size", pct, dlMb, totalMb);
+            } else if (screen.isDownloadingYoutubeVideo() && pct > 0) {
+                text = Text.translatable("text.collins.youtube.download.progress", pct);
+            } else if (screen.isDownloadingYoutubeVideo() && dlMb > 0) {
+                text = Text.translatable("text.collins.youtube.download.size", dlMb);
+            } else if (screen.isDownloadingYoutubeVideo()) {
+                if (screen.hasDownloadProgressReceived()) {
+                    text = Text.translatable("text.collins.youtube.download.progress", 0);
+                } else {
+                    text = Text.translatable("text.collins.youtube.preparing");
+                }
+            } else if (screen.isResolvingYouTube()) {
+                text = Text.translatable("text.collins.youtube.preparing");
+            } else if (totalMb > 0) {
+                text = Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb);
+            } else if (pct > 0) {
+                text = Text.translatable("text.collins.video.download.progress", pct);
+            } else if (dlMb > 0) {
+                text = Text.translatable("text.collins.video.download.size", dlMb);
             } else {
-                text = "§eСкачивание видео... " + dlMb + " МБ";
+                text = Text.translatable("text.collins.video.preparing");
             }
-            ctx.drawCenteredTextWithShadow(client.textRenderer, Text.literal(text), sw / 2, y, 0xFFFF00);
+            ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0xFFFF00);
             return;
         }
 
-        // Проверяем закончилось ли видео
         if (screen.isEnded()) {
-            String text = "§aСеанс окончен";
+            Text text = screen.hasCachedFile()
+                ? Text.translatable("text.collins.video.ended.cached", screen.getCachedFileSizeMb())
+                : Text.translatable("text.collins.video.ended");
+            ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0x55FF55);
             if (screen.hasCachedFile()) {
-                text += " §7(" + screen.getCachedFileSizeMb() + " МБ на диске)";
-            }
-            ctx.drawCenteredTextWithShadow(client.textRenderer, Text.literal(text), sw / 2, y, 0x55FF55);
-            // Показываем подсказки по удалению кэша
-            if (screen.hasCachedFile()) {
-                String hint = "§7/collins-cache delete — удалить | /collins-cache open — открыть папку";
-                ctx.drawCenteredTextWithShadow(client.textRenderer, Text.literal(hint), sw / 2, y + 12, 0x888888);
+                Text hint = Text.translatable("text.collins.video.delete_hint");
+                ctx.drawCenteredTextWithShadow(client.textRenderer, hint, sw / 2, y + 12, 0x888888);
             }
             return;
         }
 
-        // Проверяем hasEnded без ограничения времени - просто не показываем таймлайн
         if (screen.hasEnded()) {
             return;
         }
@@ -71,12 +86,10 @@ public final class VideoHudOverlay {
         long posMs = screen.currentPosMsForDisplay(serverNowMs);
         long durMs = screen.durationMs();
 
-        String text = (durMs > 0)
-                ? (TimeFormatUtil.formatMs(posMs) + " / " + TimeFormatUtil.formatMs(durMs))
-                : TimeFormatUtil.formatMs(posMs);
+        Text text = (durMs > 0)
+            ? Text.translatable("text.collins.timeline.short", TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
+            : Text.literal(TimeFormatUtil.formatMs(posMs)).formatted(Formatting.GREEN);
 
-        int color = 0x00FF00;
-
-        ctx.drawCenteredTextWithShadow(client.textRenderer, Text.literal(text).formatted(Formatting.GREEN), sw / 2, y, color);
+        ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0x00FF00);
     }
 }

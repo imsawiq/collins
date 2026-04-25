@@ -3,7 +3,7 @@ package org.sawiq.collins.paper.command;
 import org.bukkit.block.Block;
 import org.bukkit.command.*;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.java.JavaPlugin;
+import org.sawiq.collins.paper.CollinsPaperPlugin;
 import org.sawiq.collins.paper.model.Playlist;
 import org.sawiq.collins.paper.model.Screen;
 import org.sawiq.collins.paper.net.CollinsMessenger;
@@ -14,6 +14,7 @@ import org.sawiq.collins.paper.store.PlaylistStore;
 import org.sawiq.collins.paper.store.ScreenStore;
 import org.sawiq.collins.paper.util.Lang;
 import org.sawiq.collins.paper.util.ScreenFactory;
+import org.sawiq.collins.paper.util.YouTubeQuality;
 
 import java.net.InetAddress;
 import java.net.URI;
@@ -25,7 +26,7 @@ public final class CollinsCommand implements TabExecutor {
 
     private static final Pattern SCREEN_NAME_RE = Pattern.compile("^[a-zA-Z0-9_-]{1,32}$");
 
-    private final JavaPlugin plugin;
+    private final CollinsPaperPlugin plugin;
     private final ScreenStore store;
     private final PlaylistStore playlistStore;
     private final CollinsMessenger messenger;
@@ -35,7 +36,7 @@ public final class CollinsCommand implements TabExecutor {
 
     private final Map<UUID, Long> lastCommandAtMs = new ConcurrentHashMap<>();
 
-    public CollinsCommand(JavaPlugin plugin,
+    public CollinsCommand(CollinsPaperPlugin plugin,
                           ScreenStore store,
                           PlaylistStore playlistStore,
                           CollinsMessenger messenger,
@@ -133,7 +134,7 @@ public final class CollinsCommand implements TabExecutor {
                     return true;
                 }
 
-                Screen screen = ScreenFactory.create(name, sel.pos1(), sel.pos2());
+                Screen screen = ScreenFactory.create(name, sel.pos1(), sel.pos2(), plugin.defaultYoutubeQuality());
                 if (screen == null) {
                     lang.send(p, "error.selection_invalid");
                     return true;
@@ -176,19 +177,21 @@ public final class CollinsCommand implements TabExecutor {
                         safeUrl,
                         s.playing(),
                         s.loop(),
-                        s.volume()
+                        s.volume(),
+                        s.youtubeQuality()
                 );
 
                 // Смена url => сброс таймера, иначе будет seek в старую позицию другого файла
-                runtime.resetPlayback(s.name());
+                boolean sameUrl = Objects.equals(s.mp4Url(), safeUrl);
                 if (updated.playing()) {
-                    CollinsRuntimeState.Playback pb = runtime.get(s.name());
-                    pb.startEpochMs = System.currentTimeMillis();
-                    pb.basePosMs = 0;
+                    runtime.restartPlayback(s.name(), sameUrl);
+                } else {
+                    runtime.stopPlayback(s.name(), sameUrl);
                 }
 
                 store.put(updated);
                 store.save();
+                plugin.prefetchDuration(updated);
 
                 messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
@@ -206,9 +209,7 @@ public final class CollinsCommand implements TabExecutor {
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 // play = старт с нуля
-                CollinsRuntimeState.Playback pb = runtime.get(s.name());
-                pb.basePosMs = 0;
-                pb.startEpochMs = System.currentTimeMillis();
+                runtime.restartPlayback(s.name());
 
                 Screen updated = new Screen(
                         s.name(), s.world(),
@@ -218,11 +219,13 @@ public final class CollinsCommand implements TabExecutor {
                         s.mp4Url(),
                         true,
                         s.loop(),
-                        s.volume()
+                        s.volume(),
+                        s.youtubeQuality()
                 );
 
                 store.put(updated);
                 store.save();
+                plugin.prefetchDuration(updated);
                 messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
@@ -239,7 +242,7 @@ public final class CollinsCommand implements TabExecutor {
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
                 // stop = выключить и сбросить позицию на 0
-                runtime.resetPlayback(s.name());
+                runtime.stopPlayback(s.name());
 
                 Screen updated = new Screen(
                         s.name(), s.world(),
@@ -249,7 +252,8 @@ public final class CollinsCommand implements TabExecutor {
                         s.mp4Url(),
                         false,
                         s.loop(),
-                        s.volume()
+                        s.volume(),
+                        s.youtubeQuality()
                 );
 
                 store.put(updated);
@@ -285,7 +289,8 @@ public final class CollinsCommand implements TabExecutor {
                         s.mp4Url(),
                         false,
                         s.loop(),
-                        s.volume()
+                        s.volume(),
+                        s.youtubeQuality()
                 );
 
                 store.put(updated);
@@ -316,16 +321,74 @@ public final class CollinsCommand implements TabExecutor {
                         s.mp4Url(),
                         true,
                         s.loop(),
-                        s.volume()
+                        s.volume(),
+                        s.youtubeQuality()
                 );
 
                 store.put(updated);
                 store.save();
+                plugin.prefetchDuration(updated);
                 messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
 
                 lang.send(p, "cmd.resumed", lang.vars("name", name));
                 plugin.getLogger().info(p.getName() + " resume '" + name + "'");
+                return true;
+            }
+
+            case "loop" -> {
+                if (args.length < 3) { lang.send(p, "error.usage", lang.vars("usage", "/collins loop <screen> on|off")); return true; }
+                String name = args[1];
+
+                Screen s = store.get(name);
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                String raw = args[2].toLowerCase(Locale.ROOT);
+                if (!raw.equals("on") && !raw.equals("off")) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins loop <screen> on|off"));
+                    return true;
+                }
+
+                boolean loopOn = raw.equals("on");
+                store.put(s.withLoop(loopOn));
+                store.save();
+                messenger.requestBroadcastSync();
+                lang.send(p, loopOn ? "cmd.loop.on" : "cmd.loop.off", lang.vars("name", name));
+                plugin.getLogger().info(p.getName() + " loop '" + name + "' -> " + loopOn);
+                return true;
+            }
+
+            case "quality" -> {
+                if (args.length < 2) { lang.send(p, "error.usage", lang.vars("usage", "/collins quality <screen> [auto|360|480|720|1080|1440|2160]")); return true; }
+                String name = args[1];
+
+                Screen s = store.get(name);
+                if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                if (args.length < 3) {
+                    lang.send(p, "cmd.quality.current", lang.vars(
+                            "name", name,
+                            "quality", YouTubeQuality.display(s.youtubeQuality())
+                    ));
+                    return true;
+                }
+
+                Integer quality = YouTubeQuality.parse(args[2]);
+                if (quality == null) {
+                    lang.send(p, "error.usage", lang.vars("usage", "/collins quality <screen> <auto|360|480|720|1080|1440|2160>"));
+                    return true;
+                }
+
+                Screen updated = s.withYoutubeQuality(quality);
+                store.put(updated);
+                store.save();
+                plugin.prefetchDuration(updated);
+                messenger.requestBroadcastSync();
+                lang.send(p, "cmd.quality.set", lang.vars(
+                        "name", name,
+                        "quality", YouTubeQuality.display(updated.youtubeQuality())
+                ));
+                plugin.getLogger().info(p.getName() + " quality '" + name + "' -> " + YouTubeQuality.display(updated.youtubeQuality()));
                 return true;
             }
 
@@ -383,7 +446,7 @@ public final class CollinsCommand implements TabExecutor {
                     Screen updated = s.withPlaying(false);
                     store.put(updated);
                     store.save();
-                    runtime.resetPlayback(s.name());
+                    runtime.stopPlayback(s.name());
                     messenger.requestBroadcastSync();
                     lang.send(p, "cmd.seeked_end", lang.vars("name", s.name()));
                     plugin.getLogger().info(p.getName() + " seek past end '" + name + "' -> stopped");
@@ -518,6 +581,9 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.save();
                 runtime.resetPlayback(removed.name());
+                Playlist.remove(removed.name());
+                playlistStore.save();
+                plugin.forgetDurationRequestState(removed.name());
 
                 messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
@@ -533,7 +599,9 @@ public final class CollinsCommand implements TabExecutor {
                     lang.send(p, "cmd.screens.item", lang.vars(
                             "name", s.name(),
                             "url", (s.mp4Url() == null ? "" : s.mp4Url()),
-                            "playing", s.playing()
+                            "playing", s.playing(),
+                            "loop", s.loop(),
+                            "quality", YouTubeQuality.display(s.youtubeQuality())
                     ));
                 }
                 return true;
@@ -558,6 +626,7 @@ public final class CollinsCommand implements TabExecutor {
             return startsWith(args[0], List.of(
                     "pos1", "pos2", "create", "seturl",
                     "play", "stop", "pause", "resume",
+                    "loop", "quality",
                     "seek", "back",
                     "volume", "radius",
                     "remove", "list", "playlist"
@@ -566,7 +635,7 @@ public final class CollinsCommand implements TabExecutor {
 
         if (args.length == 2) {
             String sub = args[0].toLowerCase(Locale.ROOT);
-            if (sub.equals("seturl") || sub.equals("play") || sub.equals("stop") || sub.equals("pause") || sub.equals("resume") || sub.equals("remove") || sub.equals("seek") || sub.equals("back")) {
+            if (sub.equals("seturl") || sub.equals("play") || sub.equals("stop") || sub.equals("pause") || sub.equals("resume") || sub.equals("loop") || sub.equals("quality") || sub.equals("remove") || sub.equals("seek") || sub.equals("back")) {
                 List<String> names = new ArrayList<>();
                 for (Screen s : store.all()) names.add(s.name());
                 return startsWith(args[1], names);
@@ -579,6 +648,14 @@ public final class CollinsCommand implements TabExecutor {
                 for (Screen s : store.all()) names.add(s.name());
                 return startsWith(args[1], names);
             }
+        }
+
+        if (args.length == 3 && args[0].equalsIgnoreCase("loop")) {
+            return startsWith(args[2], List.of("on", "off"));
+        }
+
+        if (args.length == 3 && args[0].equalsIgnoreCase("quality")) {
+            return startsWith(args[2], YouTubeQuality.options());
         }
 
         if (args.length == 3 && args[0].equalsIgnoreCase("playlist")) {
@@ -800,28 +877,32 @@ public final class CollinsCommand implements TabExecutor {
             }
 
             case "play" -> {
-                if (args.length < 4) {
-                    lang.send(p, "error.usage", lang.vars("usage", "/collins playlist " + screenName + " play <index>"));
-                    return true;
-                }
-                int index;
-                try {
-                    index = Integer.parseInt(args[3]);
-                } catch (NumberFormatException e) {
-                    lang.send(p, "error.bad_number");
-                    return true;
-                }
-
                 Playlist playlist = Playlist.get(screenName);
                 if (playlist == null || playlist.isEmpty()) {
                     lang.send(p, "playlist.empty", lang.vars("screen", screenName));
                     return true;
                 }
 
-                Playlist.PlaylistEntry entry = playlist.jumpTo(index);
-                if (entry == null) {
-                    lang.send(p, "playlist.index_out_of_range", lang.vars("max", playlist.size()));
-                    return true;
+                Playlist.PlaylistEntry entry;
+                if (args.length >= 4) {
+                    int index;
+                    try {
+                        index = Integer.parseInt(args[3]);
+                    } catch (NumberFormatException e) {
+                        lang.send(p, "error.bad_number");
+                        return true;
+                    }
+
+                    entry = playlist.jumpTo(index);
+                    if (entry == null) {
+                        lang.send(p, "playlist.index_out_of_range", lang.vars("max", playlist.size()));
+                        return true;
+                    }
+                } else {
+                    entry = playlist.current();
+                    if (entry == null) {
+                        entry = playlist.jumpTo(1);
+                    }
                 }
 
                 playVideoFromPlaylist(p, screen, entry);
@@ -929,6 +1010,7 @@ public final class CollinsCommand implements TabExecutor {
         lang.send(p, "playlist.help.clear");
         lang.send(p, "playlist.help.loop");
         lang.send(p, "playlist.help.enable");
+        lang.send(p, "playlist.help.disable");
     }
 
     private boolean showPlaylistInfo(Player p, String screenName) {
@@ -964,16 +1046,15 @@ public final class CollinsCommand implements TabExecutor {
                 url,
                 true,
                 false, // loop=false для плейлиста!
-                screen.volume()
+                screen.volume(),
+                screen.youtubeQuality()
         );
 
-        runtime.resetPlayback(screen.name());
-        CollinsRuntimeState.Playback pb = runtime.get(screen.name());
-        pb.startEpochMs = System.currentTimeMillis();
-        pb.basePosMs = 0;
+        runtime.restartPlayback(screen.name(), Objects.equals(screen.mp4Url(), url));
 
         store.put(updated);
         store.save();
+        plugin.prefetchDuration(updated);
         messenger.requestBroadcastSync();
 
         Playlist playlist = Playlist.get(screen.name());

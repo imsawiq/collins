@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "collins-fabric",
-  "version": "1.0",
+  "version": "${version}",
   "name": "collins-fabric",
   "description": "Client mod for watching videos on in‑game screens. Requires the Collins Paper plugin on the server.",
   "authors": ["sawiq_", "Zorsh", "EssciZ"],

@@ -3,6 +3,7 @@ package org.sawiq.collins.fabric.client.video;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ChatScreen;
 import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.text.MutableText;
 import net.minecraft.text.Style;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.Vec3d;
@@ -11,7 +12,12 @@ import org.sawiq.collins.fabric.client.net.CollinsNet;
 import org.sawiq.collins.fabric.client.state.ScreenState;
 import org.sawiq.collins.fabric.client.util.TimeFormatUtil;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class VideoScreenManager {
@@ -21,17 +27,14 @@ public final class VideoScreenManager {
     private VideoScreenManager() {}
 
     private static final Map<String, VideoScreen> SCREENS = new ConcurrentHashMap<>();
-
-    // Экраны которым уже показали сообщение о удалении кэша
     private static final Set<String> SHOWN_DELETE_PROMPT = ConcurrentHashMap.newKeySet();
-    // Путь к файлу для удаления (последний предложенный)
     private static volatile String pendingDeletePath = null;
-    
+
     private static final int GREEN = 0x00FF00;
     private static final int GRAY = 0xAAAAAA;
     private static final int YELLOW = 0xFFFF55;
     private static final int RED = 0xFF5555;
-    private static final Text PREFIX = Text.literal("[Collins-Fabric] ").setStyle(Style.EMPTY.withColor(GREEN));
+    private static final Text PREFIX = Text.translatable("text.collins.prefix").setStyle(Style.EMPTY.withColor(GREEN));
 
     private static volatile long lastActionbarUpdateMs = 0;
     private static volatile String lastClientWorldKey = "";
@@ -94,7 +97,6 @@ public final class VideoScreenManager {
         return findNearestPlayingInternal(playerPos, false);
     }
 
-    /** Находит ближайший экран, включая закончившиеся (для HUD) */
     public static VideoScreen findNearestPlayingOrEnded(Vec3d playerPos) {
         return findNearestPlayingInternal(playerPos, true);
     }
@@ -103,7 +105,6 @@ public final class VideoScreenManager {
         if (playerPos == null) return null;
 
         MinecraftClient client = MinecraftClient.getInstance();
-
         VideoScreen best = null;
         double bestDist2 = Double.MAX_VALUE;
 
@@ -111,7 +112,6 @@ public final class VideoScreenManager {
             ScreenState st = s.state();
             if (st == null) continue;
             if (!isCompatibleWithCurrentWorld(st, client)) continue;
-            // Для HUD учитываем ended экраны
             boolean shouldInclude = st.playing() || (includeEnded && s.hasEnded());
             if (!shouldInclude) continue;
             if (st.url() == null || st.url().isEmpty()) continue;
@@ -139,7 +139,6 @@ public final class VideoScreenManager {
         if (radiusBlocks <= 0) return findNearestPlaying(playerPos);
 
         MinecraftClient client = MinecraftClient.getInstance();
-
         VideoScreen best = null;
         double bestDist2 = Double.MAX_VALUE;
         double r = (double) radiusBlocks;
@@ -149,7 +148,6 @@ public final class VideoScreenManager {
             ScreenState st = s.state();
             if (st == null) continue;
             if (!isCompatibleWithCurrentWorld(st, client)) continue;
-            // Показываем и playing экраны, и ended (чтобы показать "Сеанс окончен")
             if (!st.playing() && !s.isEnded()) continue;
             if (st.url() == null || st.url().isEmpty()) continue;
 
@@ -176,18 +174,24 @@ public final class VideoScreenManager {
     public static void applySync(Map<String, ScreenState> incoming) {
         Set<String> keep = new HashSet<>(incoming.keySet());
 
-        // 1) удалённые экраны
         for (String key : new ArrayList<>(SCREENS.keySet())) {
             if (!keep.contains(key)) {
                 VideoScreen vs = SCREENS.remove(key);
                 if (vs != null) {
                     if (DEBUG) System.out.println("[Collins] STOP by remove: key=" + key);
                     vs.stop();
+                    // Drop any "delete cached file?" prompts that were
+                    // associated with this screen, otherwise SHOWN_DELETE_PROMPT
+                    // accumulates {name + "_" + url} forever - one entry per
+                    // distinct URL ever played on the screen.
+                    String namePrefix = vs.state() != null ? vs.state().name() + "_" : null;
+                    if (namePrefix != null) {
+                        SHOWN_DELETE_PROMPT.removeIf(k -> k.startsWith(namePrefix));
+                    }
                 }
             }
         }
 
-        // 2) обновляем существующие/создаём новые
         for (var e : incoming.entrySet()) {
             String key = e.getKey();
             ScreenState st = e.getValue();
@@ -201,22 +205,92 @@ public final class VideoScreenManager {
                 vs.updateState(st);
             }
 
-            // 3) если сервер сказал остановить — останавливаем
             if (!st.playing() || st.url() == null || st.url().isEmpty()) {
-                if (DEBUG) System.out.println("[Collins] STOP by sync: name=" + st.name()
-                        + " playing=" + st.playing()
-                        + " url=" + st.url());
+                if (DEBUG) {
+                    System.out.println("[Collins] STOP by sync: name=" + st.name() + " playing=" + st.playing() + " url=" + st.url());
+                }
                 vs.stop();
             }
         }
+    }
+
+    private static MutableText buildActionBarText(VideoScreen nearest, long serverNowMs) {
+        int pct = Math.max(0, nearest.getDownloadPercent());
+        long dlMb = Math.max(0L, nearest.getDownloadedMb());
+        long totalMb = Math.max(0L, nearest.getDownloadTotalMb());
+
+        if (nearest.isDownloadingYtdlp()) {
+            return Text.translatable("text.collins.youtube.installing_progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        boolean youtubeHasRealProgress = totalMb > 0 || pct > 0 || dlMb > 0;
+        if (nearest.isDownloadingYoutubeVideo() && totalMb > 0) {
+            return Text.translatable("text.collins.youtube.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloadingYoutubeVideo() && pct > 0) {
+            return Text.translatable("text.collins.youtube.download.progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloadingYoutubeVideo() && dlMb > 0) {
+            return Text.translatable("text.collins.youtube.download.size", dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloadingYoutubeVideo() && !youtubeHasRealProgress) {
+            if (nearest.hasDownloadProgressReceived()) {
+                // Progress events flowing but values still 0 - show 0%
+                return Text.translatable("text.collins.youtube.download.progress", 0).setStyle(Style.EMPTY.withColor(YELLOW));
+            }
+            return Text.translatable("text.collins.youtube.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isResolvingYouTube()) {
+            return Text.translatable("text.collins.youtube.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloading() && totalMb > 0) {
+            return Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloading() && pct > 0) {
+            return Text.translatable("text.collins.video.download.progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloading() && dlMb > 0) {
+            return Text.translatable("text.collins.video.download.size", dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+        if (nearest.isDownloading()) {
+            return Text.translatable("text.collins.video.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+        }
+
+        if (nearest.isLiveStream()) {
+            return Text.translatable("text.collins.video.live", nearest.state().name()).setStyle(Style.EMPTY.withColor(RED));
+        }
+
+        long posMs = nearest.currentPosMsForDisplay(serverNowMs);
+        long durMs = nearest.durationMs();
+        if (durMs > 0) {
+            return Text.translatable("text.collins.timeline.full", nearest.state().name(), TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
+                .setStyle(Style.EMPTY.withColor(GREEN));
+        }
+        return Text.translatable("text.collins.timeline.single", nearest.state().name(), TimeFormatUtil.formatMs(posMs))
+            .setStyle(Style.EMPTY.withColor(GREEN));
+    }
+
+    private static void sendEndedPrompt(PlayerEntity player, VideoScreen nearest) {
+        String screenKey = nearest.state().name() + "_" + nearest.state().url();
+        if (!nearest.hasCachedFile() || SHOWN_DELETE_PROMPT.contains(screenKey)) return;
+
+        SHOWN_DELETE_PROMPT.add(screenKey);
+        pendingDeletePath = nearest.getCachedFilePath();
+        long sizeMb = nearest.getCachedFileSizeMb();
+
+        player.sendMessage(PREFIX.copy()
+            .append(Text.translatable("text.collins.video.session_finished_cache", sizeMb).setStyle(Style.EMPTY.withColor(GRAY)))
+            .append(Text.literal("\n"))
+            .append(Text.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
+            .append(Text.translatable("text.collins.video.delete_command_desc").setStyle(Style.EMPTY.withColor(GRAY)))
+            .append(Text.literal("\n"))
+            .append(Text.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
+            .append(Text.translatable("text.collins.video.open_command_desc").setStyle(Style.EMPTY.withColor(GRAY))), false);
     }
 
     public static void tick(MinecraftClient client) {
         PlayerEntity p = client.player;
         if (p == null) return;
 
-        // При смене мира/измерения (в т.ч. сервер/ад/энд) очищаем локальные экраны,
-        // иначе могут "прилипнуть" экраны от предыдущего подключения.
         String worldKey = currentWorldKey(client);
         if (!worldKey.equals(lastClientWorldKey)) {
             lastClientWorldKey = worldKey;
@@ -224,11 +298,8 @@ public final class VideoScreenManager {
         }
 
         Vec3d pos = p.getPos();
-
-        // ВАЖНО: используем server-sent настройки (а не тестовые константы)
         int radius = CollinsNet.HEAR_RADIUS;
         float globalVolume = CollinsNet.GLOBAL_VOLUME;
-
         long serverNowMs = estimateServerNowMs();
 
         for (VideoScreen s : SCREENS.values()) {
@@ -248,70 +319,13 @@ public final class VideoScreenManager {
 
                 VideoScreen nearest = findNearestPlayingInRadius(pos, radius);
                 if (nearest != null) {
-                    String text = null;
-                    int color = GREEN;
-
-                    // Если видео закончилось — показываем предложение удаления в чат (не в action bar)
                     if (nearest.isEnded()) {
-                        // Показываем предложение удалить кэш (только один раз и только для скачанных видео)
-                        String screenKey = nearest.state().name() + "_" + nearest.state().url();
-                        if (nearest.hasCachedFile() && !SHOWN_DELETE_PROMPT.contains(screenKey)) {
-                            SHOWN_DELETE_PROMPT.add(screenKey);
-                            pendingDeletePath = nearest.getCachedFilePath();
-                            long sizeMb = nearest.getCachedFileSizeMb();
-
-                            // Сообщение в чат с командами
-                            p.sendMessage(PREFIX.copy()
-                                .append(Text.literal("Сеанс окончен. Видео занимает " + sizeMb + " МБ на диске.\n").setStyle(Style.EMPTY.withColor(GRAY)))
-                                .append(Text.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
-                                .append(Text.literal(" — удалить видео\n").setStyle(Style.EMPTY.withColor(GRAY)))
-                                .append(Text.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
-                                .append(Text.literal(" — открыть папку").setStyle(Style.EMPTY.withColor(GRAY))), false);
-                        }
-                        // Action bar покажет пустую строку (очистит)
-                        text = "";
-                    }
-                    // Если видео уже закончилось (hasEnded) но прошло 5 секунд — ничего не показываем
-                    else if (nearest.hasEnded()) {
-                        text = "";
-                    }
-                    // Если идёт скачивание — показываем прогресс
-                    else if (nearest.isDownloading()) {
-                        int pct = nearest.getDownloadPercent();
-                        long dlMb = nearest.getDownloadedMb();
-                        long totalMb = nearest.getDownloadTotalMb();
-                        
-                        // YouTube-specific messages
-                        if (nearest.isResolvingYouTube()) {
-                            if (nearest.isDownloadingYtdlp()) {
-                                text = "🔧 Установка yt-dlp: " + pct + "%";
-                            } else {
-                                text = "▶ YouTube: получение ссылки...";
-                            }
-                        } else if (totalMb > 0) {
-                            text = "⏬ Скачивание: " + pct + "% (" + dlMb + "МБ / " + totalMb + "МБ)";
-                        } else if (dlMb > 0) {
-                            text = "⏬ Скачивание: " + dlMb + "МБ...";
-                        } else {
-                            text = "⏬ Подготовка видео...";
-                        }
-                        color = YELLOW;
-                    } else {
-                        // Обычный таймлайн
-                        long posMs = nearest.currentPosMsForDisplay(serverNowMs);
-                        long durMs = nearest.durationMs();
-
-                        text = (durMs > 0)
-                                ? (nearest.state().name() + ": " + TimeFormatUtil.formatMs(posMs) + " / " + TimeFormatUtil.formatMs(durMs))
-                                : (nearest.state().name() + ": " + TimeFormatUtil.formatMs(posMs));
-                        color = GREEN;
-                    }
-
-                    if (text != null && !text.isEmpty()) {
-                        p.sendMessage(PREFIX.copy().append(Text.literal(text).setStyle(Style.EMPTY.withColor(color))), true);
-                    } else if (text != null) {
-                        // Очищаем action bar пустым сообщением
+                        sendEndedPrompt(p, nearest);
                         p.sendMessage(Text.literal(""), true);
+                    } else if (nearest.hasEnded()) {
+                        p.sendMessage(Text.literal(""), true);
+                    } else {
+                        p.sendMessage(PREFIX.copy().append(buildActionBarText(nearest, serverNowMs)), true);
                     }
                 }
             }
@@ -336,14 +350,10 @@ public final class VideoScreenManager {
         for (VideoScreen s : SCREENS.values()) s.stop();
     }
 
-    // ==================== Управление кэшем ====================
-
-    /** Получить путь к файлу для удаления */
     public static String getPendingDeletePath() {
         return pendingDeletePath;
     }
 
-    /** Удалить последний предложенный файл */
     public static boolean deletePendingFile() {
         String path = pendingDeletePath;
         if (path != null && !path.isEmpty()) {
@@ -356,13 +366,12 @@ public final class VideoScreenManager {
         return false;
     }
 
-    /** Очистить кэш сохранённых предложений */
     public static void clearDeletePromptHistory() {
         SHOWN_DELETE_PROMPT.clear();
     }
 
-    /** Очистить путь для удаления */
     public static void clearPendingDeletePath() {
         pendingDeletePath = null;
     }
 }
+

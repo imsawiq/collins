@@ -3,6 +3,7 @@ package org.sawiq.collins.fabric.client.config;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import org.sawiq.collins.fabric.client.video.YouTubeQuality;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -15,6 +16,7 @@ public final class CollinsClientConfig {
     public int localVolumePercent = 100;
     public boolean renderVideo = true;
     public boolean actionbarTimeline = true;
+    public int youtubeMaxQuality = YouTubeQuality.DEFAULT;
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "collins.json";
@@ -82,5 +84,6 @@ public final class CollinsClientConfig {
     private static void sanitize(CollinsClientConfig cfg) {
         if (cfg.localVolumePercent < 0) cfg.localVolumePercent = 0;
         if (cfg.localVolumePercent > 100) cfg.localVolumePercent = 100;
+        cfg.youtubeMaxQuality = YouTubeQuality.sanitize(cfg.youtubeMaxQuality, YouTubeQuality.DEFAULT);
     }
 }

@@ -19,28 +19,28 @@ public final class CollinsModMenu implements ModMenuApi {
         CollinsClientConfig cfg = CollinsClientConfig.get();
 
         ConfigBuilder builder = ConfigBuilder.create()
-                .setParentScreen(parent)
-                .setTitle(Text.literal("Collins"));
+            .setParentScreen(parent)
+            .setTitle(Text.translatable("config.collins.title"));
 
         builder.setSavingRunnable(CollinsClientConfig::save);
 
-        ConfigCategory general = builder.getOrCreateCategory(Text.literal("Video"));
+        ConfigCategory general = builder.getOrCreateCategory(Text.translatable("config.collins.category.video"));
         ConfigEntryBuilder eb = builder.entryBuilder();
 
-        general.addEntry(eb.startIntSlider(Text.literal("Local volume"), cfg.localVolumePercent, 0, 100)
-                .setDefaultValue(100)
-                .setSaveConsumer(v -> cfg.localVolumePercent = v)
-                .build());
+        general.addEntry(eb.startIntSlider(Text.translatable("config.collins.local_volume"), cfg.localVolumePercent, 0, 100)
+            .setDefaultValue(100)
+            .setSaveConsumer(v -> cfg.localVolumePercent = v)
+            .build());
 
-        general.addEntry(eb.startBooleanToggle(Text.literal("Render video"), cfg.renderVideo)
-                .setDefaultValue(true)
-                .setSaveConsumer(v -> cfg.renderVideo = v)
-                .build());
+        general.addEntry(eb.startBooleanToggle(Text.translatable("config.collins.render_video"), cfg.renderVideo)
+            .setDefaultValue(true)
+            .setSaveConsumer(v -> cfg.renderVideo = v)
+            .build());
 
-        general.addEntry(eb.startBooleanToggle(Text.literal("Actionbar timeline"), cfg.actionbarTimeline)
-                .setDefaultValue(true)
-                .setSaveConsumer(v -> cfg.actionbarTimeline = v)
-                .build());
+        general.addEntry(eb.startBooleanToggle(Text.translatable("config.collins.actionbar_timeline"), cfg.actionbarTimeline)
+            .setDefaultValue(true)
+            .setSaveConsumer(v -> cfg.actionbarTimeline = v)
+            .build());
 
         return builder.build();
     }

@@ -152,8 +152,12 @@ public final class Playlist {
     public void insert(int position, String url) {
         if (position < 1) position = 1;
         if (position > entries.size() + 1) position = entries.size() + 1;
-        
+        boolean shiftCurrent = !entries.isEmpty() && (position - 1) <= currentIndex;
+
         entries.add(position - 1, new PlaylistEntry(position, url));
+        if (shiftCurrent) {
+            currentIndex++;
+        }
         reindex();
     }
 
@@ -162,14 +166,18 @@ public final class Playlist {
      */
     public boolean remove(int index) {
         if (index < 1 || index > entries.size()) return false;
-        entries.remove(index - 1);
+        int removedIndex = index - 1;
+        entries.remove(removedIndex);
         reindex();
-        
-        // Adjust current index if needed
-        if (currentIndex >= entries.size()) {
-            currentIndex = entries.isEmpty() ? 0 : entries.size() - 1;
+
+        if (entries.isEmpty()) {
+            currentIndex = 0;
+        } else if (removedIndex < currentIndex) {
+            currentIndex--;
+        } else if (currentIndex >= entries.size()) {
+            currentIndex = entries.size() - 1;
         }
-        
+
         return true;
     }
 

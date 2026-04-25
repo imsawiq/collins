@@ -10,19 +10,26 @@ import org.sawiq.collins.paper.store.ScreenStore;
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
+import java.util.UUID;
 
 public final class CollinsMessenger {
 
     private final JavaPlugin plugin;
     private final ScreenStore store;
     private final CollinsRuntimeState runtime;
+    private final Set<UUID> moddedPlayers;
+    private final Set<UUID> outdatedModdedPlayers;
 
     private volatile boolean broadcastScheduled;
 
-    public CollinsMessenger(JavaPlugin plugin, ScreenStore store, CollinsRuntimeState runtime) {
+    public CollinsMessenger(JavaPlugin plugin, ScreenStore store, CollinsRuntimeState runtime,
+                            Set<UUID> moddedPlayers, Set<UUID> outdatedModdedPlayers) {
         this.plugin = plugin;
         this.store = store;
         this.runtime = runtime;
+        this.moddedPlayers = moddedPlayers;
+        this.outdatedModdedPlayers = outdatedModdedPlayers;
     }
 
     public void sendSync(Player player) {
@@ -34,11 +41,36 @@ public final class CollinsMessenger {
         }
     }
 
+    /**
+     * Broadcasts the current sync state to every online player. Builds the
+     * payload <b>once</b> and reuses the same byte array for every send -
+     * the previous implementation rebuilt the full payload (~80 B per
+     * screen + 16 B per modded player) for every recipient, so a 100-player
+     * server with 50 screens was doing ~100 redundant ~5 KB encodes plus
+     * a fresh stream/filter/toList over the whole player list each tick.
+     */
     public void broadcastSync() {
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            sendSync(p);
+        var players = Bukkit.getOnlinePlayers();
+        if (players.isEmpty()) {
+            return;
+        }
+        byte[] payload;
+        try {
+            payload = buildWrappedSyncBytes();
+        } catch (Exception e) {
+            plugin.getLogger().warning("Failed to build SYNC: " + e.getMessage());
+            return;
+        }
+        for (Player p : players) {
+            try {
+                p.sendPluginMessage(plugin, "collins:main", payload);
+            } catch (Exception e) {
+                plugin.getLogger().warning("Failed to send SYNC to "
+                        + p.getName() + ": " + e.getMessage());
+            }
         }
     }
+
     public void requestBroadcastSync() {
         if (broadcastScheduled) return;
         broadcastScheduled = true;
@@ -49,14 +81,13 @@ public final class CollinsMessenger {
         });
     }
 
-    // WRAP: magic(4) + len(int) + innerBytes
     private byte[] buildWrappedSyncBytes() throws Exception {
         byte[] inner = buildSyncInnerBytes();
 
         var bout = new ByteArrayOutputStream();
         var out = new DataOutputStream(bout);
 
-        out.write("COLL".getBytes(StandardCharsets.US_ASCII)); // magic
+        out.write("COLL".getBytes(StandardCharsets.US_ASCII));
         out.writeInt(inner.length);
         out.write(inner);
         out.flush();
@@ -64,27 +95,6 @@ public final class CollinsMessenger {
         return bout.toByteArray();
     }
 
-    /**
-     * INNER (v2):
-     * byte msg
-     * int version
-     * float globalVolume
-     * int hearRadius
-     * long serverNowMs
-     * int count
-     * repeated screens:
-     *   UTF name
-     *   UTF world
-     *   int x1 y1 z1
-     *   int x2 y2 z2
-     *   byte axis
-     *   UTF url
-     *   boolean playing
-     *   boolean loop
-     *   float volume
-     *   long startEpochMs
-     *   long basePosMs
-     */
     private byte[] buildSyncInnerBytes() throws Exception {
         long now = System.currentTimeMillis();
 
@@ -94,10 +104,19 @@ public final class CollinsMessenger {
         out.writeByte(CollinsProtocol.MSG_SYNC);
         out.writeInt(CollinsProtocol.PROTOCOL_VERSION);
 
-        // v2 global config + time anchor
         out.writeFloat(runtime.globalVolume);
         out.writeInt(runtime.hearRadius);
         out.writeLong(now);
+
+        var onlineModded = Bukkit.getOnlinePlayers().stream()
+                .map(Player::getUniqueId)
+                .filter(moddedPlayers::contains)
+                .toList();
+        out.writeInt(onlineModded.size());
+        for (UUID uuid : onlineModded) {
+            out.writeLong(uuid.getMostSignificantBits());
+            out.writeLong(uuid.getLeastSignificantBits());
+        }
 
         var all = store.all();
         out.writeInt(all.size());
@@ -106,8 +125,12 @@ public final class CollinsMessenger {
             out.writeUTF(s.name());
             out.writeUTF(s.world());
 
-            out.writeInt(s.x1()); out.writeInt(s.y1()); out.writeInt(s.z1());
-            out.writeInt(s.x2()); out.writeInt(s.y2()); out.writeInt(s.z2());
+            out.writeInt(s.x1());
+            out.writeInt(s.y1());
+            out.writeInt(s.z1());
+            out.writeInt(s.x2());
+            out.writeInt(s.y2());
+            out.writeInt(s.z2());
 
             out.writeByte(s.axis());
 
@@ -115,10 +138,21 @@ public final class CollinsMessenger {
             out.writeBoolean(s.playing());
             out.writeBoolean(s.loop());
             out.writeFloat(s.volume());
+            out.writeInt(s.youtubeQuality());
 
             CollinsRuntimeState.Playback pb = runtime.get(s.name());
             out.writeLong(pb.startEpochMs);
             out.writeLong(pb.basePosMs);
+        }
+
+        var onlineOutdated = Bukkit.getOnlinePlayers().stream()
+                .map(Player::getUniqueId)
+                .filter(outdatedModdedPlayers::contains)
+                .toList();
+        out.writeInt(onlineOutdated.size());
+        for (UUID uuid : onlineOutdated) {
+            out.writeLong(uuid.getMostSignificantBits());
+            out.writeLong(uuid.getLeastSignificantBits());
         }
 
         out.flush();

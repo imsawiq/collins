@@ -10,6 +10,7 @@ public record ScreenState(
         boolean playing,
         boolean loop,
         float volume,
+        int youtubeQuality,
         long startEpochMs,
         long basePosMs
 

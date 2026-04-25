@@ -4,6 +4,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.sawiq.collins.paper.model.Screen;
+import org.sawiq.collins.paper.util.YouTubeQuality;
 
 import java.io.File;
 import java.io.IOException;
@@ -49,6 +50,10 @@ public final class ScreenStore {
             String path = "screens." + key + ".";
             String name = cfg.getString(path + "name", key);
             String world = cfg.getString(path + "world", "world");
+            int defaultYoutubeQuality = YouTubeQuality.sanitize(
+                    plugin.getConfig().getInt("video.defaultYouTubeQuality", YouTubeQuality.DEFAULT),
+                    YouTubeQuality.DEFAULT
+            );
 
             int x1 = cfg.getInt(path + "x1");
             int y1 = cfg.getInt(path + "y1");
@@ -60,8 +65,12 @@ public final class ScreenStore {
             int axis = cfg.getInt(path + "axis", 0);
             String url = cfg.getString(path + "mp4Url", "");
             boolean playing = cfg.getBoolean(path + "playing", false);
-            boolean loop = cfg.getBoolean(path + "loop", true);
+            boolean loop = cfg.getBoolean(path + "loop", false);
             double volumeD = cfg.getDouble(path + "volume", 1.0);
+            int youtubeQuality = YouTubeQuality.sanitize(
+                    cfg.getInt(path + "youtubeQuality", defaultYoutubeQuality),
+                    defaultYoutubeQuality
+            );
 
             put(new Screen(
                     name,
@@ -72,7 +81,8 @@ public final class ScreenStore {
                     url == null ? "" : url,
                     playing,
                     loop,
-                    (float) volumeD
+                    (float) volumeD,
+                    youtubeQuality
             ));
         }
     }
@@ -100,6 +110,7 @@ public final class ScreenStore {
             cfg.set(path + "playing", s.playing());
             cfg.set(path + "loop", s.loop());
             cfg.set(path + "volume", (double) s.volume());
+            cfg.set(path + "youtubeQuality", s.youtubeQuality());
         }
 
         try {

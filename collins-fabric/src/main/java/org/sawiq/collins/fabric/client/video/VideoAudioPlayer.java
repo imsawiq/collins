@@ -27,12 +27,13 @@ public final class VideoAudioPlayer implements AutoCloseable {
 
         AudioFormat fmt = new AudioFormat(sampleRate, 16, channels, true, false); // PCM 16-bit LE
         DataLine.Info info = new DataLine.Info(SourceDataLine.class, fmt);
+        int bytesPerSecond = sampleRate * channels * 2;
+        int lineBufferBytes = Math.max(65_536, bytesPerSecond);
 
         this.line = (SourceDataLine) AudioSystem.getLine(info);
-        this.line.open(fmt);
+        this.line.open(fmt, lineBufferBytes);
         this.started = false;
 
-        int bytesPerSecond = sampleRate * channels * 2;
         this.prebufferMaxBytes = Math.max(65536, bytesPerSecond * 4);
     }
 

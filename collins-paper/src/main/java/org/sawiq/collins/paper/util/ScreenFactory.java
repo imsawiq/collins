@@ -7,7 +7,8 @@ import org.sawiq.collins.paper.model.Screen;
 public final class ScreenFactory {
     private ScreenFactory() {}
 
-    public static Screen create(String name, Block a, Block b) {
+    public static Screen create(String name, Block a, Block b, int defaultYoutubeQuality) {
+        int youtubeQuality = YouTubeQuality.sanitize(defaultYoutubeQuality, YouTubeQuality.DEFAULT);
         String world = a.getWorld().getName();
 
         int x1 = Math.min(a.getX(), b.getX());
@@ -35,8 +36,9 @@ public final class ScreenFactory {
                 axis.id,
                 "",
                 false,
-                true,
-                1.0f
+                false,
+                1.0f,
+                youtubeQuality
         );
     }
 }

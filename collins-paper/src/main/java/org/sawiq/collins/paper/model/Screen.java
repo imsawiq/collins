@@ -9,10 +9,19 @@ public record Screen(
         String mp4Url,
         boolean playing,
         boolean loop,
-        float volume
+        float volume,
+        int youtubeQuality
 ) {
     /** Создаёт копию с изменённым флагом playing */
     public Screen withPlaying(boolean playing) {
-        return new Screen(name, world, x1, y1, z1, x2, y2, z2, axis, mp4Url, playing, loop, volume);
+        return new Screen(name, world, x1, y1, z1, x2, y2, z2, axis, mp4Url, playing, loop, volume, youtubeQuality);
+    }
+
+    public Screen withLoop(boolean loop) {
+        return new Screen(name, world, x1, y1, z1, x2, y2, z2, axis, mp4Url, playing, loop, volume, youtubeQuality);
+    }
+
+    public Screen withYoutubeQuality(int youtubeQuality) {
+        return new Screen(name, world, x1, y1, z1, x2, y2, z2, axis, mp4Url, playing, loop, volume, youtubeQuality);
     }
 }
