@@ -29,7 +29,13 @@ This repository includes two parts that work together:
 
 #### Client mod (Collins Fabric)
 - **Video playback on screens**: render video frames directly in-world.
-- **YouTube support**: paste YouTube links directly — they work out of the box.
+- **Supported sources**:
+    - **YouTube** videos (regular VOD).
+    - **RuTube** videos.
+    - **VK Video / VK Clips** (`vk.com/video`, `vk.com/clip`, `vkvideo.ru`).
+    - **YouTube live streams**.
+    - **Twitch live streams** (with stitched-ad filtering).
+    - Direct video URLs (`http(s)://.../*.mp4` etc.).
 - **Audio playback**: client-side audio with local volume control.
 - **Actionbar timeline**: optional live timeline display near active screens.
 - **Config menu** (ModMenu): toggle rendering, set local volume, toggle actionbar timeline.
@@ -39,7 +45,7 @@ This repository includes two parts that work together:
 #### Server plugin (Collins Paper)
 - **Create and manage screens**: server controls what plays on each screen.
 - **Playlists**: create playlists with multiple videos, auto-advancement, and loop support.
-- **YouTube support**: YouTube links are automatically resolved to playable streams.
+- **Multi-platform link resolution**: YouTube / RuTube / VK Video links plus YouTube and Twitch live streams are automatically resolved by the client mod; the server just stores and broadcasts the URL.
 - **Playback control commands**: play/stop/seek utilities (including backward seek).
 - **Synced state broadcast**: clients receive the screen state and play it locally.
 
@@ -138,7 +144,13 @@ Found a bug or have an idea? Please open an issue on GitHub.
 
 #### Клиент (Collins Fabric)
 - **Проигрывание видео на экранах**: видео отображается прямо в мире.
-- **Поддержка YouTube**: вставляй ссылки с YouTube — они работают сразу.
+- **Поддерживаемые источники**:
+    - **YouTube** — обычные видео.
+    - **RuTube** — видео.
+    - **VK Видео / VK Клипы** (`vk.com/video`, `vk.com/clip`, `vkvideo.ru`).
+    - **YouTube стримы** (live).
+    - **Twitch стримы** (live, с фильтрацией встроенной рекламы).
+    - Прямые ссылки на видео (`http(s)://.../*.mp4` и т.п.).
 - **Звук**: звук проигрывается на клиенте, есть локальная регулировка громкости.
 - **Таймлайн в actionbar**: опционально показывает прогресс рядом с активными экранами.
 - **Меню настроек** (ModMenu): тумблер рендера, локальная громкость, таймлайн в actionbar.
@@ -148,7 +160,7 @@ Found a bug or have an idea? Please open an issue on GitHub.
 #### Сервер (Collins Paper)
 - **Создание и управление экранами**: сервер задаёт что и где проигрывается.
 - **Плейлисты**: создавай плейлисты с несколькими видео, автопереключением и зацикливанием.
-- **Поддержка YouTube**: ссылки с YouTube автоматически резолвятся в воспроизводимые потоки.
+- **Поддержка нескольких платформ**: ссылки YouTube / RuTube / VK Видео, а также стримы YouTube и Twitch автоматически резолвятся клиентским модом — сервер просто хранит и рассылает URL.
 - **Команды управления**: play/stop/seek (включая перемотку назад).
 - **Синхронизация состояния**: клиентам отправляется состояние экранов, проигрывание идёт локально.
 

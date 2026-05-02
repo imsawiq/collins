@@ -7,7 +7,8 @@
     "NativeImageAccessor"
   ],
   "client": [
-    "PlayerListHudMixin"
+    "PlayerListHudMixin",
+    "WorldRendererMixin"
   ],
   "injectors": {
     "defaultRequire": 1

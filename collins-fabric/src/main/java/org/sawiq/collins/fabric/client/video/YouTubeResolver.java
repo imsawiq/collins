@@ -53,6 +53,37 @@ public final class YouTubeResolver {
         "(?:https?://)?(?:www\\.)?twitch\\.tv/(?!directory|downloads|jobs|p/|settings|inventory|wallet)([a-zA-Z0-9_]+)(?:[/?#].*)?"
     );
 
+    // RuTube videos use a 32-char lowercase hex id under several path prefixes.
+    // Mirrors the canonical match in yt-dlp's RutubeIE._VALID_URL.
+    private static final Pattern RUTUBE_PATTERN = Pattern.compile(
+        "(?:https?://)?(?:www\\.)?rutube\\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed|shorts)/([0-9a-f]{32})"
+    );
+
+    // VK videos always reference a (owner_id)_(video_id) pair. Owner can be
+    // negative (group/community). Hosts: vk.com, m.vk.com, vkvideo.ru, m.vkvideo.ru.
+    // Mirrors the relevant subset of yt-dlp's VKVideoIE._VALID_URL.
+    private static final Pattern VK_PATTERN = Pattern.compile(
+        "(?:https?://)?(?:(?:www\\.|m\\.|new\\.)?vk\\.com|(?:www\\.|m\\.)?vkvideo\\.ru)/(?:video|clip|video_ext\\.php\\?[^#]*?\\boid=(-?\\d+)[^#]*?\\bid=(\\d+)|[^?#]*?\\bz=video)(-?\\d+_\\d+)?"
+    );
+
+    /**
+     * Single-source-of-truth platform classifier for any URL we know how to
+     * resolve via yt-dlp + ffmpeg. Each entry carries the on-disk cache
+     * subdirectory (relative to {@code collins-cache/}).
+     */
+    private enum Platform {
+        YOUTUBE("youtube"),
+        TWITCH("twitch"),
+        RUTUBE("rutube"),
+        VK("vk");
+
+        final String cacheSubdir;
+
+        Platform(String cacheSubdir) {
+            this.cacheSubdir = cacheSubdir;
+        }
+    }
+
     /**
      * Resolved URL cache. Bounded LRU (max {@value #URL_CACHE_MAX} entries)
      * to prevent unbounded growth across long sessions; entries also expire
@@ -117,8 +148,36 @@ public final class YouTubeResolver {
         return url.toLowerCase(Locale.ROOT).contains("twitch.tv");
     }
 
+    public static boolean isRuTubeUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        return url.toLowerCase(Locale.ROOT).contains("rutube.ru");
+    }
+
+    public static boolean isVKUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        String u = url.toLowerCase(Locale.ROOT);
+        return u.contains("vk.com/video")
+            || u.contains("vk.com/clip")
+            || u.contains("vk.com/video_ext.php")
+            || u.contains("vkvideo.ru");
+    }
+
     public static boolean isSupportedPlatformUrl(String url) {
-        return isYouTubeUrl(url) || isTwitchUrl(url);
+        return isYouTubeUrl(url) || isTwitchUrl(url) || isRuTubeUrl(url) || isVKUrl(url);
+    }
+
+    /**
+     * Resolves a URL to its {@link Platform} or {@code null} if we don't
+     * know how to handle it. Order matters - host checks are mutually
+     * exclusive, so the order is irrelevant for correctness, but YouTube
+     * is checked first because it's the hottest path.
+     */
+    private static Platform classifyPlatform(String url) {
+        if (isYouTubeUrl(url)) return Platform.YOUTUBE;
+        if (isTwitchUrl(url)) return Platform.TWITCH;
+        if (isRuTubeUrl(url)) return Platform.RUTUBE;
+        if (isVKUrl(url)) return Platform.VK;
+        return null;
     }
 
     public static String extractVideoId(String url) {
@@ -139,6 +198,55 @@ public final class YouTubeResolver {
         return null;
     }
 
+    /** RuTube id is a 32-char lowercase hex string. */
+    private static String extractRuTubeId(String url) {
+        if (url == null) return null;
+        Matcher m = RUTUBE_PATTERN.matcher(url);
+        if (m.find()) {
+            return m.group(1);
+        }
+        return null;
+    }
+
+    /**
+     * VK videos are addressed by {@code <ownerId>_<videoId>}. The pattern
+     * captures the pair either from the {@code /video<owner>_<id>}-style
+     * path (group 3) or from the {@code video_ext.php?oid=...&id=...}
+     * variant (groups 1 + 2). Returns the canonical
+     * {@code <owner>_<id>} string, or {@code null} if the URL is malformed.
+     */
+    private static String extractVKId(String url) {
+        if (url == null) return null;
+        Matcher m = VK_PATTERN.matcher(url);
+        if (!m.find()) return null;
+
+        String ownerIdPair = m.group(3);
+        if (ownerIdPair != null && !ownerIdPair.isBlank()) {
+            return ownerIdPair;
+        }
+        String oid = m.group(1);
+        String id = m.group(2);
+        if (oid != null && id != null) {
+            return oid + "_" + id;
+        }
+        return null;
+    }
+
+    /**
+     * Returns the canonical source-id for the given URL on its platform, or
+     * {@code null} if the URL doesn't belong to a known platform or the id
+     * could not be extracted. Used as the cache-key suffix.
+     */
+    private static String extractPlatformId(Platform platform, String url) {
+        if (platform == null || url == null) return null;
+        return switch (platform) {
+            case YOUTUBE -> extractVideoId(url);
+            case TWITCH -> extractTwitchChannel(url);
+            case RUTUBE -> extractRuTubeId(url);
+            case VK -> extractVKId(url);
+        };
+    }
+
     public static YouTubeResult resolve(String url) {
         return resolve(url, YouTubeQuality.DEFAULT);
     }
@@ -152,15 +260,17 @@ public final class YouTubeResolver {
             return new YouTubeResult(null, null, 0, "Empty URL", false, false);
         }
 
-        boolean youtube = isYouTubeUrl(url);
-        boolean twitch = isTwitchUrl(url);
-        if (!youtube && !twitch) {
+        Platform platform = classifyPlatform(url);
+        if (platform == null) {
             return new YouTubeResult(null, null, 0, "Not a supported platform URL", false, false);
         }
 
+        boolean youtube = platform == Platform.YOUTUBE;
+        boolean twitch = platform == Platform.TWITCH;
+
         int targetHeight = normalizeTargetHeight(preferredHeight);
 
-        String sourceId = youtube ? extractVideoId(url) : extractTwitchChannel(url);
+        String sourceId = extractPlatformId(platform, url);
         if (sourceId == null || sourceId.isBlank()) {
             sourceId = Integer.toHexString(url.hashCode());
         }
@@ -197,7 +307,13 @@ public final class YouTubeResolver {
             }
         }
 
-        // === YouTube cache fast path (replays, no network). ===
+        // === VOD cache fast path (replays, no network) - works for any
+        // VOD platform (YouTube / RuTube / VK). The cache key is just
+        // sourceId@quality so the namespace is shared across platforms;
+        // their id formats don't collide (YT=11 chars b64, RuTube=32 hex,
+        // VK=<owner>_<id>). The disk cache is platform-aware: each
+        // platform owns a dedicated subdirectory under collins-cache/. ===
+        Path platformCacheDir = getPlatformCacheDir(platform);
         if (sourceId != null && !sourceId.isBlank() && !sourceId.equals(Integer.toHexString(url.hashCode()))) {
             String cacheKey = cacheKey(sourceId, targetHeight);
             ResolvedUrl cached = URL_CACHE.get(cacheKey);
@@ -205,16 +321,16 @@ public final class YouTubeResolver {
                 Path cachedPath = Path.of(cached.directUrl());
                 if (Files.isRegularFile(cachedPath)) {
                     notifyCachedFileUsed(cachedPath, sink);
-                    dbg("resolve: fast path memory-cached local file for " + sourceId);
+                    dbg("resolve: fast path memory-cached local file for " + platform + ":" + sourceId);
                     return new YouTubeResult(cached.directUrl, sourceId, cached.durationMs, null, false, false);
                 }
             }
-            Path cachedFile = findCachedYoutubeFile(sourceId, targetHeight);
+            Path cachedFile = findCachedFile(platformCacheDir, sourceId, targetHeight);
             if (cachedFile != null) {
-                long durationMs = readCachedDuration(sourceId);
+                long durationMs = readCachedDuration(platformCacheDir, sourceId);
                 URL_CACHE.put(cacheKey, new ResolvedUrl(cachedFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
                 notifyCachedFileUsed(cachedFile, sink);
-                dbg("resolve: fast path disk-cached file for " + sourceId + " quality=" + targetHeight);
+                dbg("resolve: fast path disk-cached file for " + platform + ":" + sourceId + " quality=" + targetHeight);
                 return new YouTubeResult(cachedFile.toString(), sourceId, durationMs, null, false, false);
             }
         }
@@ -223,16 +339,18 @@ public final class YouTubeResolver {
         // If the video is not live, this returns null and we fall through to the
         // yt-dlp VOD download flow below. Passing targetHeight pins FFmpeg to
         // a specific variant so we get consistent quality without ABR jumps.
-        String videoId = extractVideoId(url);
-        if (videoId != null && !videoId.isBlank()) {
-            String liveHls = YouTubeLiveClient.resolveLiveHlsUrl(videoId, targetHeight);
-            if (liveHls != null) {
-                dbg("resolve: youtube direct live HLS for " + videoId);
-                return new YouTubeResult(liveHls, videoId, 0L, null, false, true);
+        if (youtube) {
+            String videoId = extractVideoId(url);
+            if (videoId != null && !videoId.isBlank()) {
+                String liveHls = YouTubeLiveClient.resolveLiveHlsUrl(videoId, targetHeight);
+                if (liveHls != null) {
+                    dbg("resolve: youtube direct live HLS for " + videoId);
+                    return new YouTubeResult(liveHls, videoId, 0L, null, false, true);
+                }
             }
         }
 
-        // === YouTube VOD path: keep the existing yt-dlp + ffmpeg download flow. ===
+        // === yt-dlp VOD path: works for YouTube / RuTube / VK. ===
         if (!ensureYtdlpAvailable()) {
             if (ytdlpDownloading) {
                 return new YouTubeResult(null, sourceId, 0, "yt-dlp downloading: " + ytdlpDownloadProgress + "%", true, false);
@@ -251,51 +369,58 @@ public final class YouTubeResolver {
                 return new YouTubeResult(directUrl, sourceId, 0L, null, false, true);
             }
 
-            if (youtube) {
-                // Re-check cache with the authoritative video id from metadata.
-                String cacheKey = cacheKey(sourceId, targetHeight);
-                ResolvedUrl cached = URL_CACHE.get(cacheKey);
-                if (cached != null && !cached.isExpired()) {
-                    Path cachedPath = Path.of(cached.directUrl());
-                    if (Files.isRegularFile(cachedPath)) {
-                        notifyCachedFileUsed(cachedPath, sink);
-                        dbg("resolve: using memory-cached local file for " + sourceId);
-                        return new YouTubeResult(cached.directUrl, sourceId, cached.durationMs, null, false, false);
-                    }
+            // VOD branch - same flow for YouTube, RuTube, VK: re-check the
+            // cache with the authoritative source id from metadata, then
+            // fall through to the yt-dlp download pipeline.
+            String cacheKey = cacheKey(sourceId, targetHeight);
+            ResolvedUrl cached = URL_CACHE.get(cacheKey);
+            if (cached != null && !cached.isExpired()) {
+                Path cachedPath = Path.of(cached.directUrl());
+                if (Files.isRegularFile(cachedPath)) {
+                    notifyCachedFileUsed(cachedPath, sink);
+                    dbg("resolve: using memory-cached local file for " + platform + ":" + sourceId);
+                    return new YouTubeResult(cached.directUrl, sourceId, cached.durationMs, null, false, false);
                 }
-
-                Path cachedFile = findCachedYoutubeFile(sourceId, targetHeight);
-                if (cachedFile != null) {
-                    long durationMs = readCachedDuration(sourceId);
-                    URL_CACHE.put(cacheKey, new ResolvedUrl(cachedFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
-                    notifyCachedFileUsed(cachedFile, sink);
-                    dbg("resolve: using disk-cached local file for " + sourceId + " quality=" + targetHeight);
-                    return new YouTubeResult(cachedFile.toString(), sourceId, durationMs, null, false, false);
-                }
-
-                if (!ensureFfmpegAvailable()) {
-                    return new YouTubeResult(null, sourceId, 0, "ffmpeg not available", true, false);
-                }
-                return downloadYoutubeToCache(sourceId, targetHeight, sink);
             }
 
-            String directUrl = resolveDirectStreamUrl(url, targetHeight, false);
-            return new YouTubeResult(directUrl, sourceId, meta.durationMs(), null, false, false);
+            Path cachedFile = findCachedFile(platformCacheDir, sourceId, targetHeight);
+            if (cachedFile != null) {
+                long durationMs = readCachedDuration(platformCacheDir, sourceId);
+                URL_CACHE.put(cacheKey, new ResolvedUrl(cachedFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
+                notifyCachedFileUsed(cachedFile, sink);
+                dbg("resolve: using disk-cached local file for " + platform + ":" + sourceId + " quality=" + targetHeight);
+                return new YouTubeResult(cachedFile.toString(), sourceId, durationMs, null, false, false);
+            }
+
+            if (!ensureFfmpegAvailable()) {
+                return new YouTubeResult(null, sourceId, 0, "ffmpeg not available", true, false);
+            }
+
+            // YouTube uses the canonical /watch?v=<id> URL (legacy behaviour
+            // preserved); RuTube and VK pass their original URL through to
+            // yt-dlp because their canonical form already contains the id.
+            String downloadUrl = (platform == Platform.YOUTUBE)
+                ? "https://www.youtube.com/watch?v=" + sourceId
+                : url;
+            return downloadVodToCache(platform, downloadUrl, sourceId, targetHeight, sink);
         } catch (Exception e) {
             dbg("resolve: metadata error " + e.getMessage());
 
-            // Minimal fallback chain: for YouTube we can still try a direct download by video id.
-            // Skip expensive yt-dlp binary refresh (it re-downloads ~20MB every failure).
-            if (youtube) {
-                Path cachedFile = findCachedYoutubeFile(sourceId, targetHeight);
-                if (cachedFile != null) {
-                    long durationMs = readCachedDuration(sourceId);
-                    URL_CACHE.put(cacheKey(sourceId, targetHeight), new ResolvedUrl(cachedFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
-                    notifyCachedFileUsed(cachedFile, sink);
-                    dbg("resolve: metadata fallback to cached YouTube file for " + sourceId);
-                    return new YouTubeResult(cachedFile.toString(), sourceId, durationMs, null, false, false);
-                }
+            // Minimal fallback chain: for VOD platforms (YT/RuTube/VK) we
+            // can still hit the disk cache (transient extractor failure
+            // doesn't invalidate previously-downloaded files). Skip the
+            // expensive yt-dlp binary refresh - it re-downloads ~20MB on
+            // every failure.
+            Path cachedFile = findCachedFile(platformCacheDir, sourceId, targetHeight);
+            if (cachedFile != null) {
+                long durationMs = readCachedDuration(platformCacheDir, sourceId);
+                URL_CACHE.put(cacheKey(sourceId, targetHeight), new ResolvedUrl(cachedFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
+                notifyCachedFileUsed(cachedFile, sink);
+                dbg("resolve: metadata fallback to cached " + platform + " file for " + sourceId);
+                return new YouTubeResult(cachedFile.toString(), sourceId, durationMs, null, false, false);
+            }
 
+            if (youtube) {
                 String extractedVideoId = extractVideoId(url);
                 if (extractedVideoId != null && !extractedVideoId.isBlank()) {
                     sourceId = extractedVideoId;
@@ -311,8 +436,9 @@ public final class YouTubeResolver {
                     }
                 }
 
-                // Last-resort: try a direct live URL grab. Helps when the stream is live
-                // and metadata fetch failed only due to a transient extractor issue.
+                // Last-resort: try a direct live URL grab. Helps when the
+                // stream is live and metadata fetch failed only due to a
+                // transient extractor issue.
                 try {
                     String directUrl = resolveDirectStreamUrl(url, targetHeight, true);
                     dbg("resolve: metadata fallback to direct YouTube live url");
@@ -322,14 +448,16 @@ public final class YouTubeResolver {
                     e = directError;
                 }
             } else {
-                // Twitch / other live platforms: try a fresh direct URL grab as the only
-                // useful retry; do NOT spin up the ~20MB yt-dlp re-download.
+                // RuTube / VK: try a direct URL grab as the last resort. If
+                // the platform happens to be live, this returns the live
+                // playlist; for VODs it returns a direct CDN URL we can
+                // play without going through the disk cache.
                 try {
                     String directUrl = resolveDirectStreamUrl(url, targetHeight, false);
-                    dbg("resolve: metadata fallback to direct Twitch/live url");
+                    dbg("resolve: metadata fallback to direct " + platform + " url");
                     return new YouTubeResult(directUrl, sourceId, 0L, null, false, true);
                 } catch (Exception directError) {
-                    dbg("resolve: fallback direct Twitch url failed " + directError.getMessage());
+                    dbg("resolve: fallback direct " + platform + " url failed " + directError.getMessage());
                     e = directError;
                 }
             }
@@ -385,11 +513,16 @@ public final class YouTubeResolver {
     }
 
     public static Path getCachedVideoPath(String url, int preferredHeight) {
-        String videoId = extractVideoId(url);
-        if (videoId == null) return null;
+        Platform platform = classifyPlatform(url);
+        if (platform == null || platform == Platform.TWITCH) {
+            // Twitch is live-only - no on-disk cache makes sense.
+            return null;
+        }
+        String sourceId = extractPlatformId(platform, url);
+        if (sourceId == null || sourceId.isBlank()) return null;
 
         int targetHeight = normalizeTargetHeight(preferredHeight);
-        String cacheKey = cacheKey(videoId, targetHeight);
+        String cacheKey = cacheKey(sourceId, targetHeight);
 
         ResolvedUrl cached = URL_CACHE.get(cacheKey);
         if (cached != null && !cached.isExpired()) {
@@ -402,7 +535,7 @@ public final class YouTubeResolver {
             }
         }
 
-        return findCachedYoutubeFile(videoId, targetHeight);
+        return findCachedFile(getPlatformCacheDir(platform), sourceId, targetHeight);
     }
 
     private static boolean ensureYtdlpAvailable() {
@@ -537,15 +670,38 @@ public final class YouTubeResolver {
     }
 
     private static YouTubeResult downloadYoutubeToCache(String videoId, int preferredHeight, VideoPlayer.FrameSink sink) throws Exception {
+        return downloadVodToCache(Platform.YOUTUBE,
+                "https://www.youtube.com/watch?v=" + videoId,
+                videoId,
+                preferredHeight,
+                sink);
+    }
+
+    /**
+     * Generic VOD download pipeline. Runs {@code yt-dlp} against
+     * {@code sourceUrl} and saves the resulting file under the platform's
+     * cache directory using {@code sourceId} as the filename prefix.
+     *
+     * <p>The body is structurally identical to the original
+     * {@code downloadYoutubeToCache} - it just substitutes the cache dir
+     * and gates the YouTube-specific {@code --cookies}/{@code --extractor-args}
+     * injection on {@code platform == YOUTUBE}. RuTube and VK go through
+     * exactly this code path with their original URL and extracted source
+     * id.</p>
+     */
+    private static YouTubeResult downloadVodToCache(Platform platform,
+                                                    String sourceUrl,
+                                                    String sourceId,
+                                                    int preferredHeight,
+                                                    VideoPlayer.FrameSink sink) throws Exception {
         int targetHeight = normalizeTargetHeight(preferredHeight);
-        Path cacheDir = getYoutubeCacheDir();
+        Path cacheDir = getPlatformCacheDir(platform);
         Files.createDirectories(cacheDir);
-        String cachePrefix = buildCachePrefix(videoId, targetHeight);
-        deleteYoutubeTempArtifacts(cachePrefix);
+        String cachePrefix = buildCachePrefix(sourceId, targetHeight);
+        deleteTempArtifacts(cacheDir, cachePrefix);
 
         Path outputBase = cacheDir.resolve(cachePrefix + ".%(ext)s");
 
-        String videoUrl = "https://www.youtube.com/watch?v=" + videoId;
         String selector = buildDownloadFormatSelector(targetHeight);
         // Estimate size from the --print before_dl callback emitted by yt-dlp during the actual download.
         // Skipping the extra --simulate run saves ~5-15s on every YouTube playback.
@@ -573,10 +729,16 @@ public final class YouTubeResolver {
         command.add("--extractor-retries");
         command.add("2");
         command.add("--newline");
+        // Six progress fields: percent, downloaded_bytes, total_bytes,
+        // total_bytes_estimate, fragment_index, fragment_count. The last
+        // two are critical for HLS / DASH (RuTube live, RuTube HLS,
+        // some VK formats) where total_bytes is often NA throughout the
+        // entire download - fragments give us a monotonic, reliable
+        // progress signal even when byte estimates aren't available.
         command.add("--progress-template");
-        command.add("download:CollinsYTProgress:%(progress.percent)s:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s");
+        command.add("download:CollinsYTProgress:%(progress.percent)s:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s:%(progress.fragment_index)s:%(progress.fragment_count)s");
         command.add("--progress-template");
-        command.add("download:fragment:CollinsYTProgress:%(progress.percent)s:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s");
+        command.add("download:fragment:CollinsYTProgress:%(progress.percent)s:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s:%(progress.fragment_index)s:%(progress.fragment_count)s");
         command.add("--ffmpeg-location");
         command.add(getToolsDir().toString());
         command.add("--output");
@@ -587,14 +749,24 @@ public final class YouTubeResolver {
         command.add("after_move:%(filepath)s");
         command.add("--print");
         command.add("%(duration)s");
-        addOptionalYouTubeAuthArgs(command);
-        command.add(videoUrl);
+        if (platform == Platform.YOUTUBE) {
+            addOptionalYouTubeAuthArgs(command);
+        }
+        command.add(sourceUrl);
 
-        dbg("downloadYoutubeToCache: selector=" + selector);
+        dbg("downloadVodToCache: platform=" + platform + " selector=" + selector);
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         if (sink != null) {
-            sink.onDownloadStart("collins.video.youtube_downloading");
+            // Emit a platform-specific phase string so the HUD can render
+            // the correct label (YouTube / RuTube / VK) instead of always
+            // showing "YouTube: downloading...".
+            String downloadingKey = switch (platform) {
+                case RUTUBE -> "collins.video.rutube_downloading";
+                case VK -> "collins.video.vk_downloading";
+                default -> "collins.video.youtube_downloading";
+            };
+            sink.onDownloadStart(downloadingKey);
         }
 
         Process p = pb.start();
@@ -605,7 +777,7 @@ public final class YouTubeResolver {
         AtomicBoolean monitorRunning = new AtomicBoolean(sink != null);
         Thread progressMonitor = null;
         if (sink != null) {
-            progressMonitor = new Thread(() -> monitorYoutubeDownloadProgress(cachePrefix, totalEstimateBytes, monitorRunning, sink),
+            progressMonitor = new Thread(() -> monitorDownloadProgress(cacheDir, cachePrefix, totalEstimateBytes, monitorRunning, sink),
                 "Collins-YTProgress-" + cachePrefix);
             progressMonitor.setDaemon(true);
             progressMonitor.start();
@@ -618,9 +790,22 @@ public final class YouTubeResolver {
                 String trimmed = line.trim();
                 if (trimmed.startsWith("before_dl:CollinsYTMeta:")) {
                     updatePrintedDownloadSize(trimmed, totalEstimateBytes);
+                    // Surface the total size to the HUD the moment yt-dlp
+                    // announces it (pre-transfer), so the progress line
+                    // flips from "preparing..." to "X: 0% (0 MB / Y MB)"
+                    // without waiting for the first progress tick. The
+                    // Math.max merge in VideoScreen.onDownloadProgress
+                    // protects against later "audio-only" announcements
+                    // shrinking the displayed total.
+                    if (sink != null) {
+                        long announcedBytes = totalEstimateBytes.get();
+                        if (announcedBytes > 0) {
+                            sink.onDownloadProgress(0, 0L, bytesToMb(announcedBytes));
+                        }
+                    }
                 }
                 if (sink != null) {
-                    updateDownloadProgressFromYtdlp(trimmed, sink);
+                    updateDownloadProgressFromYtdlp(trimmed, sink, totalEstimateBytes);
                 }
                 if (trimmed.startsWith("after_move:")) {
                     finalPath = trimmed.substring("after_move:".length()).trim();
@@ -642,13 +827,13 @@ public final class YouTubeResolver {
         }
         if (!finished) {
             p.destroyForcibly();
-            return new YouTubeResult(null, videoId, 0, "yt-dlp timeout while downloading video", false, false);
+            return new YouTubeResult(null, sourceId, 0, "yt-dlp timeout while downloading video", false, false);
         }
 
         if (p.exitValue() != 0) {
             String err = output.toString().trim();
             if (err.length() > 300) err = err.substring(0, 300) + "...";
-            return new YouTubeResult(null, videoId, 0, "yt-dlp download error: " + err, false, false);
+            return new YouTubeResult(null, sourceId, 0, "yt-dlp download error: " + err, false, false);
         }
 
         Path finalFile = null;
@@ -659,17 +844,17 @@ public final class YouTubeResolver {
             }
         }
         if (finalFile == null) {
-            finalFile = findCachedYoutubeFile(videoId, targetHeight);
+            finalFile = findCachedFile(cacheDir, sourceId, targetHeight);
         }
         if (finalFile == null) {
-            return new YouTubeResult(null, videoId, 0, "Downloaded file not found", false, false);
+            return new YouTubeResult(null, sourceId, 0, "Downloaded file not found", false, false);
         }
 
-        writeCachedDuration(videoId, durationMs);
-        URL_CACHE.put(cacheKey(videoId, targetHeight), new ResolvedUrl(finalFile.toString(), videoId, System.currentTimeMillis(), durationMs));
+        writeCachedDuration(cacheDir, sourceId, durationMs);
+        URL_CACHE.put(cacheKey(sourceId, targetHeight), new ResolvedUrl(finalFile.toString(), sourceId, System.currentTimeMillis(), durationMs));
         notifyCachedFileUsed(finalFile, sink);
-        dbg("downloadYoutubeToCache: cached file=" + finalFile);
-        return new YouTubeResult(finalFile.toString(), videoId, durationMs, null, false, false);
+        dbg("downloadVodToCache: platform=" + platform + " cached file=" + finalFile);
+        return new YouTubeResult(finalFile.toString(), sourceId, durationMs, null, false, false);
     }
 
     private static void notifyCachedFileUsed(Path file, VideoPlayer.FrameSink sink) {
@@ -680,7 +865,7 @@ public final class YouTubeResolver {
         }
     }
 
-    private static void updateDownloadProgressFromYtdlp(String line, VideoPlayer.FrameSink sink) {
+    private static void updateDownloadProgressFromYtdlp(String line, VideoPlayer.FrameSink sink, AtomicLong totalEstimateAtomic) {
         if (line == null || line.isBlank()) return;
 
         try {
@@ -696,12 +881,47 @@ public final class YouTubeResolver {
                 long downloadedBytes = parts.length > 1 ? parseLongSafe(parts[1]) : 0L;
                 long totalBytes = parts.length > 2 ? parseLongSafe(parts[2]) : 0L;
                 long totalEstimateBytes = parts.length > 3 ? parseLongSafe(parts[3]) : 0L;
+                long fragmentIndex = parts.length > 4 ? parseLongSafe(parts[4]) : 0L;
+                long fragmentCount = parts.length > 5 ? parseLongSafe(parts[5]) : 0L;
 
                 long totalBytesFinal = totalBytes > 0 ? totalBytes : totalEstimateBytes;
+
+                // HLS / DASH fallback: yt-dlp leaves total_bytes and
+                // total_bytes_estimate as NA for some fragment-based
+                // formats (RuTube HLS, certain VK clips). Scale the
+                // already-downloaded bytes by the fragment ratio to get
+                // a usable total estimate. Refines on every tick as more
+                // fragments arrive; VideoScreen.onDownloadProgress takes
+                // a Math.max so the displayed total never shrinks.
+                if (totalBytesFinal <= 0 && fragmentCount > 0 && fragmentIndex > 0 && downloadedBytes > 0) {
+                    totalBytesFinal = Math.round((double) downloadedBytes * fragmentCount / fragmentIndex);
+                }
+
+                // Keep the disk-poll monitor in sync. Without this the
+                // monitor thread would compute percent against a stale
+                // 0 estimate and emit (0%, dlMb, 0) on every tick,
+                // forcing the HUD into the "X MB..." (no percent) branch.
+                final long observedTotalBytes = totalBytesFinal;
+                if (observedTotalBytes > 0 && totalEstimateAtomic != null) {
+                    totalEstimateAtomic.updateAndGet(prev -> Math.max(prev, observedTotalBytes));
+                }
+
                 long downloadedMb = bytesToMb(downloadedBytes);
                 long totalMb = bytesToMb(totalBytesFinal);
-                int percent = percentRaw > 0.0 ? (int) Math.round(percentRaw)
-                    : (totalBytesFinal > 0 ? (int) Math.round((downloadedBytes * 100.0) / totalBytesFinal) : 0);
+                // Preference order:
+                // 1. yt-dlp's own percent (most accurate when available)
+                // 2. fragment ratio (monotonic, ideal for HLS)
+                // 3. byte ratio (fine for non-fragment formats)
+                int percent;
+                if (percentRaw > 0.0) {
+                    percent = (int) Math.round(percentRaw);
+                } else if (fragmentCount > 0 && fragmentIndex > 0) {
+                    percent = (int) Math.min(100L, Math.round((fragmentIndex * 100.0) / fragmentCount));
+                } else if (totalBytesFinal > 0 && downloadedBytes > 0) {
+                    percent = (int) Math.round((downloadedBytes * 100.0) / totalBytesFinal);
+                } else {
+                    percent = 0;
+                }
                 if (percent > 0 || downloadedMb > 0 || totalMb > 0) {
                     sink.onDownloadProgress(percent, downloadedMb, totalMb);
                     return;
@@ -1012,11 +1232,20 @@ public final class YouTubeResolver {
     }
 
     private static Path findCachedYoutubeFile(String videoId, int preferredHeight) {
+        return findCachedFile(getYoutubeCacheDir(), videoId, preferredHeight);
+    }
+
+    /**
+     * Generic version of {@link #findCachedYoutubeFile} that works against
+     * any platform's cache directory. Looks for a file with the exact
+     * {@code <id>.<height>p.<ext>} prefix first, then falls back (only for
+     * the default quality) to the legacy {@code <id>.} prefix.
+     */
+    private static Path findCachedFile(Path cacheDir, String sourceId, int preferredHeight) {
         try {
-            Path dir = getYoutubeCacheDir();
-            if (!Files.isDirectory(dir)) return null;
-            String exactPrefix = buildCachePrefix(videoId, preferredHeight) + ".";
-            try (var stream = Files.list(dir)) {
+            if (cacheDir == null || !Files.isDirectory(cacheDir)) return null;
+            String exactPrefix = buildCachePrefix(sourceId, preferredHeight) + ".";
+            try (var stream = Files.list(cacheDir)) {
                 Path exact = stream
                     .filter(Files::isRegularFile)
                     .filter(path -> path.getFileName().toString().startsWith(exactPrefix))
@@ -1033,8 +1262,8 @@ public final class YouTubeResolver {
                 return null;
             }
 
-            String legacyPrefix = videoId + ".";
-            try (var stream = Files.list(dir)) {
+            String legacyPrefix = sourceId + ".";
+            try (var stream = Files.list(cacheDir)) {
                 return stream
                     .filter(Files::isRegularFile)
                     .filter(path -> {
@@ -1052,8 +1281,12 @@ public final class YouTubeResolver {
     }
 
     private static long readCachedDuration(String videoId) {
+        return readCachedDuration(getYoutubeCacheDir(), videoId);
+    }
+
+    private static long readCachedDuration(Path cacheDir, String sourceId) {
         try {
-            Path path = getYoutubeCacheDir().resolve(videoId + ".duration.txt");
+            Path path = cacheDir.resolve(sourceId + ".duration.txt");
             if (!Files.isRegularFile(path)) return 0L;
             return Long.parseLong(Files.readString(path).trim());
         } catch (Exception e) {
@@ -1062,10 +1295,14 @@ public final class YouTubeResolver {
     }
 
     private static void writeCachedDuration(String videoId, long durationMs) {
+        writeCachedDuration(getYoutubeCacheDir(), videoId, durationMs);
+    }
+
+    private static void writeCachedDuration(Path cacheDir, String sourceId, long durationMs) {
         if (durationMs <= 0) return;
         try {
-            Files.createDirectories(getYoutubeCacheDir());
-            Files.writeString(getYoutubeCacheDir().resolve(videoId + ".duration.txt"), Long.toString(durationMs));
+            Files.createDirectories(cacheDir);
+            Files.writeString(cacheDir.resolve(sourceId + ".duration.txt"), Long.toString(durationMs));
         } catch (Exception ignored) {
         }
     }
@@ -1162,10 +1399,13 @@ public final class YouTubeResolver {
     }
 
     private static void deleteYoutubeTempArtifacts(String cachePrefix) {
+        deleteTempArtifacts(getYoutubeCacheDir(), cachePrefix);
+    }
+
+    private static void deleteTempArtifacts(Path cacheDir, String cachePrefix) {
         try {
-            Path dir = getYoutubeCacheDir();
-            if (!Files.isDirectory(dir)) return;
-            try (var stream = Files.list(dir)) {
+            if (cacheDir == null || !Files.isDirectory(cacheDir)) return;
+            try (var stream = Files.list(cacheDir)) {
                 stream.filter(Files::isRegularFile)
                     .filter(path -> path.getFileName().toString().startsWith(cachePrefix + "."))
                     .filter(path -> !isCompletedYoutubeMediaFile(path))
@@ -1194,10 +1434,16 @@ public final class YouTubeResolver {
 
     private static void monitorYoutubeDownloadProgress(String cachePrefix, AtomicLong totalEstimateBytes,
                                                        AtomicBoolean running, VideoPlayer.FrameSink sink) {
+        monitorDownloadProgress(getYoutubeCacheDir(), cachePrefix, totalEstimateBytes, running, sink);
+    }
+
+    private static void monitorDownloadProgress(Path cacheDir, String cachePrefix,
+                                                AtomicLong totalEstimateBytes,
+                                                AtomicBoolean running, VideoPlayer.FrameSink sink) {
         long lastBytes = -1L;
         while (running.get()) {
             try {
-                long downloadedBytes = measureYoutubeDownloadBytes(cachePrefix);
+                long downloadedBytes = measureDownloadBytes(cacheDir, cachePrefix);
                 if (downloadedBytes > 0 && downloadedBytes != lastBytes) {
                     lastBytes = downloadedBytes;
                     long totalBytes = totalEstimateBytes.get();
@@ -1266,11 +1512,14 @@ public final class YouTubeResolver {
     }
 
     private static long measureYoutubeDownloadBytes(String cachePrefix) {
+        return measureDownloadBytes(getYoutubeCacheDir(), cachePrefix);
+    }
+
+    private static long measureDownloadBytes(Path cacheDir, String cachePrefix) {
         long total = 0L;
         try {
-            Path dir = getYoutubeCacheDir();
-            if (!Files.isDirectory(dir)) return 0L;
-            try (var stream = Files.list(dir)) {
+            if (cacheDir == null || !Files.isDirectory(cacheDir)) return 0L;
+            try (var stream = Files.list(cacheDir)) {
                 total = stream
                     .filter(Files::isRegularFile)
                     .filter(path -> path.getFileName().toString().startsWith(cachePrefix + "."))
@@ -1317,10 +1566,22 @@ public final class YouTubeResolver {
     }
 
     private static Path getYoutubeCacheDir() {
+        return getPlatformCacheDir(Platform.YOUTUBE);
+    }
+
+    /**
+     * Returns the on-disk cache directory for a given platform's downloaded
+     * VOD files. All platforms share the same {@code collins-cache/} root;
+     * each gets its own subdirectory named after {@link Platform#cacheSubdir}
+     * so files don't collide and we can delete one platform's cache
+     * independently.
+     */
+    private static Path getPlatformCacheDir(Platform platform) {
+        String sub = platform != null ? platform.cacheSubdir : "youtube";
         try {
-            return FabricLoader.getInstance().getGameDir().resolve("collins-cache").resolve("youtube");
+            return FabricLoader.getInstance().getGameDir().resolve("collins-cache").resolve(sub);
         } catch (Exception e) {
-            return Path.of("collins-cache", "youtube");
+            return Path.of("collins-cache", sub);
         }
     }
 

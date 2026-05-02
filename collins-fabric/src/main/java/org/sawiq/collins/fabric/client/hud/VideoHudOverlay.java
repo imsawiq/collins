@@ -37,22 +37,23 @@ public final class VideoHudOverlay {
             long dlMb = Math.max(0L, screen.getDownloadedMb());
             long totalMb = Math.max(0L, screen.getDownloadTotalMb());
             Text text;
+            String platform = screen.getPlatformLabel();
             if (screen.isDownloadingYtdlp()) {
                 text = Text.translatable("text.collins.youtube.installing_progress", pct);
-            } else if (screen.isDownloadingYoutubeVideo() && totalMb > 0) {
-                text = Text.translatable("text.collins.youtube.download.progress_size", pct, dlMb, totalMb);
-            } else if (screen.isDownloadingYoutubeVideo() && pct > 0) {
-                text = Text.translatable("text.collins.youtube.download.progress", pct);
-            } else if (screen.isDownloadingYoutubeVideo() && dlMb > 0) {
-                text = Text.translatable("text.collins.youtube.download.size", dlMb);
-            } else if (screen.isDownloadingYoutubeVideo()) {
+            } else if (screen.isDownloadingPlatformVideo() && totalMb > 0) {
+                text = Text.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb);
+            } else if (screen.isDownloadingPlatformVideo() && pct > 0) {
+                text = Text.translatable("text.collins.platform.download.progress", platform, pct);
+            } else if (screen.isDownloadingPlatformVideo() && dlMb > 0) {
+                text = Text.translatable("text.collins.platform.download.size", platform, dlMb);
+            } else if (screen.isDownloadingPlatformVideo()) {
                 if (screen.hasDownloadProgressReceived()) {
-                    text = Text.translatable("text.collins.youtube.download.progress", 0);
+                    text = Text.translatable("text.collins.platform.download.progress", platform, 0);
                 } else {
-                    text = Text.translatable("text.collins.youtube.preparing");
+                    text = Text.translatable("text.collins.platform.preparing", platform);
                 }
-            } else if (screen.isResolvingYouTube()) {
-                text = Text.translatable("text.collins.youtube.preparing");
+            } else if (screen.isResolvingPlatformVideo()) {
+                text = Text.translatable("text.collins.platform.preparing", platform);
             } else if (totalMb > 0) {
                 text = Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb);
             } else if (pct > 0) {

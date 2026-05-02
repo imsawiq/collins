@@ -1,8 +1,7 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
@@ -13,6 +12,7 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
+import org.sawiq.collins.fabric.client.render.CollinsWorldRenderEvents;
 import org.sawiq.collins.fabric.client.state.ScreenState;
 
 public final class VideoScreenRenderer {
@@ -22,17 +22,21 @@ public final class VideoScreenRenderer {
     private VideoScreenRenderer() {}
 
     public static void init() {
-        WorldRenderEvents.LAST.register(VideoScreenRenderer::render);
+        // Subscribe to our custom "end of world rendering" event, which is
+        // wired up from WorldRendererMixin. We deliberately avoid Fabric's
+        // WorldRenderEvents here: that class was deleted from Fabric API
+        // in the 1.21.9 / 1.21.10 release with no replacement, so any
+        // static reference would break loading on those versions.
+        CollinsWorldRenderEvents.registerLast(VideoScreenRenderer::render);
     }
 
-    private static void render(WorldRenderContext ctx) {
-        MatrixStack matrices = ctx.matrixStack();
-        if (matrices == null) return;
+    private static void render(MatrixStack matrices, Camera camera) {
+        if (matrices == null || camera == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
         VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
 
-        Vec3d cam = ctx.camera().getPos();
+        Vec3d cam = camera.getPos();
 
         matrices.push();
         matrices.translate(-cam.x, -cam.y, -cam.z);

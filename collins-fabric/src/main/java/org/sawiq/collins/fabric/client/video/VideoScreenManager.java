@@ -222,25 +222,26 @@ public final class VideoScreenManager {
         if (nearest.isDownloadingYtdlp()) {
             return Text.translatable("text.collins.youtube.installing_progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
         }
-        boolean youtubeHasRealProgress = totalMb > 0 || pct > 0 || dlMb > 0;
-        if (nearest.isDownloadingYoutubeVideo() && totalMb > 0) {
-            return Text.translatable("text.collins.youtube.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        String platform = nearest.getPlatformLabel();
+        boolean platformHasRealProgress = totalMb > 0 || pct > 0 || dlMb > 0;
+        if (nearest.isDownloadingPlatformVideo() && totalMb > 0) {
+            return Text.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
-        if (nearest.isDownloadingYoutubeVideo() && pct > 0) {
-            return Text.translatable("text.collins.youtube.download.progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+        if (nearest.isDownloadingPlatformVideo() && pct > 0) {
+            return Text.translatable("text.collins.platform.download.progress", platform, pct).setStyle(Style.EMPTY.withColor(YELLOW));
         }
-        if (nearest.isDownloadingYoutubeVideo() && dlMb > 0) {
-            return Text.translatable("text.collins.youtube.download.size", dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
+        if (nearest.isDownloadingPlatformVideo() && dlMb > 0) {
+            return Text.translatable("text.collins.platform.download.size", platform, dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
-        if (nearest.isDownloadingYoutubeVideo() && !youtubeHasRealProgress) {
+        if (nearest.isDownloadingPlatformVideo() && !platformHasRealProgress) {
             if (nearest.hasDownloadProgressReceived()) {
                 // Progress events flowing but values still 0 - show 0%
-                return Text.translatable("text.collins.youtube.download.progress", 0).setStyle(Style.EMPTY.withColor(YELLOW));
+                return Text.translatable("text.collins.platform.download.progress", platform, 0).setStyle(Style.EMPTY.withColor(YELLOW));
             }
-            return Text.translatable("text.collins.youtube.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+            return Text.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
         }
-        if (nearest.isResolvingYouTube()) {
-            return Text.translatable("text.collins.youtube.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+        if (nearest.isResolvingPlatformVideo()) {
+            return Text.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloading() && totalMb > 0) {
             return Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));

@@ -30,13 +30,22 @@ public final class Playlist {
 
         private static String extractTitle(String url) {
             if (url == null) return "Unknown";
-            
-            // Check for YouTube URLs
+
+            // Recognise platform URLs so the playlist renders a stable,
+            // human-friendly label instead of a 100-char query string.
             if (isYouTubeUrl(url)) {
                 String id = extractYouTubeId(url);
                 return id != null ? "YouTube: " + id : "YouTube Video";
             }
-            
+            if (isRuTubeUrl(url)) {
+                String id = extractRuTubeId(url);
+                return id != null ? "RuTube: " + id : "RuTube Video";
+            }
+            if (isVKUrl(url)) {
+                String id = extractVKId(url);
+                return id != null ? "VK: " + id : "VK Video";
+            }
+
             // Extract filename from URL
             int lastSlash = url.lastIndexOf('/');
             if (lastSlash >= 0 && lastSlash < url.length() - 1) {
@@ -46,7 +55,7 @@ public final class Playlist {
                 if (name.length() > 40) name = name.substring(0, 37) + "...";
                 return name;
             }
-            
+
             return "Video";
         }
 
@@ -54,6 +63,20 @@ public final class Playlist {
             if (url == null) return false;
             String lower = url.toLowerCase();
             return lower.contains("youtube.com") || lower.contains("youtu.be");
+        }
+
+        private static boolean isRuTubeUrl(String url) {
+            if (url == null) return false;
+            return url.toLowerCase().contains("rutube.ru");
+        }
+
+        private static boolean isVKUrl(String url) {
+            if (url == null) return false;
+            String lower = url.toLowerCase();
+            return lower.contains("vk.com/video")
+                || lower.contains("vk.com/clip")
+                || lower.contains("vk.com/video_ext.php")
+                || lower.contains("vkvideo.ru");
         }
 
         private static String extractYouTubeId(String url) {
@@ -76,6 +99,46 @@ public final class Playlist {
                 if (end > start) return url.substring(start, Math.min(end, start + 11));
             }
             
+            return null;
+        }
+
+        /** Matches the 32-char hex id RuTube uses under /video/, /embed/ and /shorts/. */
+        private static final java.util.regex.Pattern RUTUBE_ID_PATTERN = java.util.regex.Pattern.compile(
+            "rutube\\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed|shorts)/([0-9a-f]{32})",
+            java.util.regex.Pattern.CASE_INSENSITIVE
+        );
+
+        private static String extractRuTubeId(String url) {
+            if (url == null) return null;
+            java.util.regex.Matcher m = RUTUBE_ID_PATTERN.matcher(url);
+            return m.find() ? m.group(1) : null;
+        }
+
+        /**
+         * VK videos are keyed by {@code <ownerId>_<videoId>}. Captures the
+         * pair from either the path form ({@code /video-1_2} or
+         * {@code /clip-1_2}) or the legacy {@code video_ext.php?oid=..&id=..}
+         * form.
+         */
+        private static final java.util.regex.Pattern VK_PATH_ID_PATTERN = java.util.regex.Pattern.compile(
+            "(?:vk\\.com|vkvideo\\.ru)/(?:video|clip)(-?\\d+_\\d+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE
+        );
+        private static final java.util.regex.Pattern VK_EXT_ID_PATTERN = java.util.regex.Pattern.compile(
+            "video_ext\\.php\\?[^#]*?\\boid=(-?\\d+)[^#]*?\\bid=(\\d+)",
+            java.util.regex.Pattern.CASE_INSENSITIVE
+        );
+
+        private static String extractVKId(String url) {
+            if (url == null) return null;
+            java.util.regex.Matcher pathMatcher = VK_PATH_ID_PATTERN.matcher(url);
+            if (pathMatcher.find()) {
+                return pathMatcher.group(1);
+            }
+            java.util.regex.Matcher extMatcher = VK_EXT_ID_PATTERN.matcher(url);
+            if (extMatcher.find()) {
+                return extMatcher.group(1) + "_" + extMatcher.group(2);
+            }
             return null;
         }
     }

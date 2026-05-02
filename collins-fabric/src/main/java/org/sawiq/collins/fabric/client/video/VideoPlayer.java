@@ -875,9 +875,20 @@ public final class VideoPlayer {
         // YouTube/Twitch URL resolution
         if (YouTubeResolver.isSupportedPlatformUrl(originalUrl)) {
             dbg("playOnce: detected platform URL, resolving...");
-            sink.onDownloadStart(YouTubeResolver.isYouTubeUrl(originalUrl)
-                ? "collins.video.youtube_preparing"
-                : "collins.video.preparing");
+            // Platform-aware preparing message. VideoScreen#onDownloadStart
+            // parses the middle token (youtube/rutube/vk) to decide which
+            // user-facing label to render in the HUD and screen overlay.
+            String prepareKey;
+            if (YouTubeResolver.isYouTubeUrl(originalUrl)) {
+                prepareKey = "collins.video.youtube_preparing";
+            } else if (YouTubeResolver.isRuTubeUrl(originalUrl)) {
+                prepareKey = "collins.video.rutube_preparing";
+            } else if (YouTubeResolver.isVKUrl(originalUrl)) {
+                prepareKey = "collins.video.vk_preparing";
+            } else {
+                prepareKey = "collins.video.preparing";
+            }
+            sink.onDownloadStart(prepareKey);
             YouTubeResolver.YouTubeResult ytResult = YouTubeResolver.resolve(originalUrl, preferredYoutubeHeight, sink);
             
             if (sessionId != mySessionId || !running) {

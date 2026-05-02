@@ -104,11 +104,19 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private volatile long downloadedMb = 0;
     private volatile long downloadTotalMb = 0;
     private volatile long downloadStartWallMs = 0;
-    private volatile boolean resolvingYouTube = false;
+    private volatile boolean resolvingPlatformVideo = false;
     private volatile boolean downloadingYtdlp = false;
-    private volatile boolean downloadingYoutubeVideo = false;
+    private volatile boolean downloadingPlatformVideo = false;
     private volatile boolean downloadProgressReceived = false;
     private volatile String downloadPhase = "";
+    /**
+     * Display label of the platform that the current download belongs to
+     * (e.g. {@code "YouTube"}, {@code "RuTube"}, {@code "VK"}). Empty
+     * string when no platform-specific phase is active. The HUD feeds
+     * this into the {@code text.collins.platform.*} lang strings as the
+     * first {@code %s} placeholder.
+     */
+    private volatile String platformLabel = "";
     private volatile long lastVideoFrameAtMs = 0L;
     private volatile long playbackStartedAtMs = 0L;
     private volatile long lastLiveRestartAtMs = 0L;
@@ -816,17 +824,38 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             this.downloadStartWallMs = System.currentTimeMillis();
         }
         
-        // Track YouTube-specific states
+        // Track the active platform phase so the HUD can render the
+        // correct label. Message keys follow the convention
+        // "collins.video.<platform>_<phase>" where <platform> is one of
+        // youtube / rutube / vk and <phase> is preparing / downloading
+        // (or ytdlp for the yt-dlp binary install phase).
         if (message != null) {
-            this.resolvingYouTube = message.contains("youtube");
+            this.platformLabel = extractPlatformLabel(message);
+            boolean hasPlatform = !this.platformLabel.isEmpty();
+            this.resolvingPlatformVideo = hasPlatform;
             this.downloadingYtdlp = message.contains("ytdlp");
-            this.downloadingYoutubeVideo = message.contains("youtube_downloading");
+            this.downloadingPlatformVideo = hasPlatform
+                && (message.contains("_downloading"));
         } else {
-            this.resolvingYouTube = false;
+            this.platformLabel = "";
+            this.resolvingPlatformVideo = false;
             this.downloadingYtdlp = false;
-            this.downloadingYoutubeVideo = false;
+            this.downloadingPlatformVideo = false;
         }
         this.downloadPhase = phase;
+    }
+
+    /**
+     * Returns the display label for the platform encoded in the given
+     * download message, or an empty string for messages that don't name
+     * a platform (generic downloads, yt-dlp installer, etc.).
+     */
+    private static String extractPlatformLabel(String message) {
+        if (message == null) return "";
+        if (message.contains("youtube")) return "YouTube";
+        if (message.contains("rutube")) return "RuTube";
+        if (message.contains("vk_")) return "VK";
+        return "";
     }
 
     @Override
@@ -847,10 +876,12 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     public int getDownloadPercent() { return downloadPercent; }
     public long getDownloadedMb() { return downloadedMb; }
     public long getDownloadTotalMb() { return downloadTotalMb; }
-    public boolean isResolvingYouTube() { return resolvingYouTube; }
+    public boolean isResolvingPlatformVideo() { return resolvingPlatformVideo; }
     public boolean isDownloadingYtdlp() { return downloadingYtdlp; }
-    public boolean isDownloadingYoutubeVideo() { return downloadingYoutubeVideo; }
+    public boolean isDownloadingPlatformVideo() { return downloadingPlatformVideo; }
     public boolean hasDownloadProgressReceived() { return downloadProgressReceived; }
+    /** @return display label of the active platform download ("YouTube" / "RuTube" / "VK"), or empty string. */
+    public String getPlatformLabel() { return platformLabel; }
 
     // РРЅС„РѕСЂРјР°С†РёСЏ Рѕ РєСЌС€РёСЂРѕРІР°РЅРЅРѕРј С„Р°Р№Р»Рµ (РґР»СЏ РїСЂРµРґР»РѕР¶РµРЅРёСЏ СѓРґР°Р»РµРЅРёСЏ)
     private volatile String cachedFilePath = null;
@@ -878,26 +909,32 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.downloadedMb = 0;
         this.downloadTotalMb = 0;
         this.downloadStartWallMs = 0;
-        this.resolvingYouTube = false;
+        this.resolvingPlatformVideo = false;
         this.downloadingYtdlp = false;
-        this.downloadingYoutubeVideo = false;
+        this.downloadingPlatformVideo = false;
         this.downloadProgressReceived = false;
         this.downloadPhase = "";
+        this.platformLabel = "";
     }
 
     private static String normalizeDownloadPhase(String message) {
         if (message == null || message.isBlank()) {
             return "";
         }
-        if (message.contains("youtube_downloading")) {
+        // Distinct phases per platform so switching between a RuTube prepare
+        // and a YouTube prepare doesn't falsely count as the "same phase"
+        // (which would suppress the progress reset in onDownloadStart).
+        if (message.contains("_downloading")) {
+            if (message.contains("rutube")) return "rutube_download";
+            if (message.contains("vk_")) return "vk_download";
             return "youtube_download";
         }
         if (message.contains("ytdlp")) {
             return "youtube_ytdlp";
         }
-        if (message.contains("youtube")) {
-            return "youtube_prepare";
-        }
+        if (message.contains("rutube")) return "rutube_prepare";
+        if (message.contains("vk_")) return "vk_prepare";
+        if (message.contains("youtube")) return "youtube_prepare";
         return "generic";
     }
 

@@ -108,12 +108,17 @@ public class FFprobeUtil {
     }
 
     private static boolean isYtDlpUrl(String url) {
-        return url != null && (
-            url.contains("youtube.com") || 
-            url.contains("youtu.be") ||
-            url.contains("ytimg.com") ||
-            url.contains("twitch.tv")
-        );
+        if (url == null) return false;
+        String lower = url.toLowerCase();
+        return lower.contains("youtube.com")
+            || lower.contains("youtu.be")
+            || lower.contains("ytimg.com")
+            || lower.contains("twitch.tv")
+            || lower.contains("rutube.ru")
+            || lower.contains("vkvideo.ru")
+            || lower.contains("vk.com/video")
+            || lower.contains("vk.com/clip")
+            || lower.contains("vk.com/video_ext.php");
     }
 
     private static ProbeResult getDurationViaYtDlp(String url) throws Exception {
