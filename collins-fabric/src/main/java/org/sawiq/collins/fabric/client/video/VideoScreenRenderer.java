@@ -1,24 +1,19 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.fabricmc.loader.api.FabricLoader;
-import net.fabricmc.loader.api.MappingResolver;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
-
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-import java.util.function.Function;
 
 /**
  * Renders in-world video screens as quads at the end of the world render
@@ -27,159 +22,24 @@ import java.util.function.Function;
  * with an {@code END_MAIN} phase. (Fabric API removed the legacy
  * {@code WorldRenderEvents} when porting to 1.21.9 and a replacement was
  * only shipped in 1.21.10, so the mod's {@code fabric.mod.json} pins MC
- * to {@code >=1.21.10}.) Bindings are resolved via reflection so a future
- * minor signature shift does not break compilation, and the per-frame
- * dispatch is wrapped in try/catch so a vanilla rendering API change can
- * never crash the world renderer.
+ * to {@code >=1.21.10}.) The per-frame dispatch is wrapped in try/catch so
+ * a vanilla rendering API change can never crash the world renderer.
  */
 public final class VideoScreenRenderer {
 
     private static final double EPS = 0.01;
 
-    // API-dependent accessors, resolved once during init(). Null means the
-    // corresponding World Render API flavour could not be bound.
-    private static Function<Object, MatrixStack> CTX_MATRICES;
-    private static Function<Object, Vec3d> CTX_CAM_POS;
-    private static Function<Identifier, RenderLayer> RENDER_LAYER_LOOKUP;
     private static volatile boolean renderLayerWarned = false;
 
     private VideoScreenRenderer() {}
 
     public static void init() {
-        // The mod requires 1.21.10+ (fabric.mod.json minimum); on those
-        // versions Fabric API exposes the redesigned WorldRenderEvents in
-        // the .world. subpackage. We bind via reflection so a future minor
-        // signature shift does not break compilation.
-        try {
-            Class<?> events = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents");
-            setupModernApi(events);
-        } catch (Throwable t) {
-            warn("WorldRenderEvents bind failed; video screens will not render", t);
-        }
-    }
-
-    // ----- API bindings ----------------------------------------------------
-
-    private static void setupModernApi(Class<?> eventsClass) throws Exception {
-        Class<?> ctxClass = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext");
-        Method matricesM = ctxClass.getMethod("matrices");
-        Method worldStateM = ctxClass.getMethod("worldState");
-        Class<?> worldStateClass = worldStateM.getReturnType();
-        Field crsField = worldStateClass.getField("cameraRenderState");
-        Field posField = crsField.getType().getField("pos");
-
-        CTX_MATRICES = ctx -> {
-            try {
-                return (MatrixStack) matricesM.invoke(ctx);
-            } catch (Exception e) {
-                return null;
-            }
-        };
-        CTX_CAM_POS = ctx -> {
-            try {
-                Object ws = worldStateM.invoke(ctx);
-                if (ws == null) return null;
-                Object crs = crsField.get(ws);
-                if (crs == null) return null;
-                return (Vec3d) posField.get(crs);
-            } catch (Exception e) {
-                return null;
-            }
-        };
-        RENDER_LAYER_LOOKUP = resolveRenderLayerLookup();
-
-        Class<?> listenerIface = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents$EndMain");
-        Object event = eventsClass.getField("END_MAIN").get(null);
-        registerListener(event, listenerIface);
-    }
-
-    private static void registerListener(Object event, Class<?> listenerIface) throws Exception {
-        // Use the listener interface's own classloader so Proxy can see it
-        // even if Fabric API ships in a separate module classloader.
-        ClassLoader cl = listenerIface.getClassLoader();
-        if (cl == null) cl = VideoScreenRenderer.class.getClassLoader();
-        Object proxy = Proxy.newProxyInstance(
-            cl,
-            new Class<?>[]{ listenerIface },
-            (p, method, args) -> {
-                if (method.getDeclaringClass() == Object.class) {
-                    return switch (method.getName()) {
-                        case "toString" -> "CollinsVideoScreenRenderer$Listener";
-                        case "hashCode" -> System.identityHashCode(p);
-                        case "equals" -> args != null && args.length > 0 && args[0] == p;
-                        default -> null;
-                    };
-                }
-                // Every Fabric API listener method we bind takes a single
-                // WorldRenderContext argument; call the shared hook.
-                if (args != null && args.length >= 1) {
-                    dispatch(args[0]);
-                }
-                return null;
-            }
-        );
-        Method register = event.getClass().getMethod("register", Object.class);
-        register.invoke(event, proxy);
-    }
-
-    private static Function<Identifier, RenderLayer> resolveRenderLayerLookup() {
-        // The vanilla method that produces our entity-cutout layer was both
-        // moved (RenderLayer -> RenderLayers) and renumbered between 1.21.9
-        // and 1.21.10. We resolve the runtime name for each candidate via
-        // MappingResolver instead of guessing yarn names, because in
-        // production all method names are obfuscated and a yarn-name probe
-        // would always miss.
-        MappingResolver mr = FabricLoader.getInstance().getMappingResolver();
-        String idDesc = "(Lnet/minecraft/class_2960;)Lnet/minecraft/class_1921;";
-
-        // 1.21.10+: net.minecraft.client.render.RenderLayers#entityCutoutNoCullZOffset
-        Function<Identifier, RenderLayer> modern = tryStaticByIntermediary(
-            mr, "net.minecraft.class_12249", "method_75996", idDesc);
-        if (modern != null) {
-            return modern;
-        }
-
-        // 1.21.9 and earlier: net.minecraft.client.render.RenderLayer#getEntityCutoutNoCullZOffset.
-        // Kept as a defensive fallback; the mod is pinned to 1.21.10+ in
-        // fabric.mod.json so this path normally never runs.
-        Function<Identifier, RenderLayer> legacy = tryStaticByIntermediary(
-            mr, "net.minecraft.class_1921", "method_28116", idDesc);
-        if (legacy != null) {
-            return legacy;
-        }
-        return id -> null;
-    }
-
-    private static Function<Identifier, RenderLayer> tryStaticByIntermediary(
-            MappingResolver mr, String intermediaryClass, String intermediaryMethod, String intermediaryDesc) {
-        try {
-            String runtimeClassName = mr.mapClassName("intermediary", intermediaryClass);
-            Class<?> cls = Class.forName(runtimeClassName);
-            String runtimeMethodName = mr.mapMethodName(
-                "intermediary", intermediaryClass, intermediaryMethod, intermediaryDesc);
-            for (Method m : cls.getMethods()) {
-                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
-                if (!m.getName().equals(runtimeMethodName)) continue;
-                if (m.getParameterCount() != 1) continue;
-                if (m.getParameterTypes()[0] != Identifier.class) continue;
-                if (m.getReturnType() != RenderLayer.class) continue;
-                final Method bound = m;
-                return id -> {
-                    try {
-                        return (RenderLayer) bound.invoke(null, id);
-                    } catch (Exception e) {
-                        return null;
-                    }
-                };
-            }
-        } catch (Throwable ignored) {
-        }
-        return null;
+        WorldRenderEvents.END_MAIN.register(VideoScreenRenderer::dispatch);
     }
 
     // ----- Render hook -----------------------------------------------------
 
-    private static void dispatch(Object ctx) {
+    private static void dispatch(WorldRenderContext ctx) {
         try {
             onRender(ctx);
         } catch (Throwable t) {
@@ -193,18 +53,14 @@ public final class VideoScreenRenderer {
         }
     }
 
-    private static void onRender(Object ctx) {
-        Function<Object, MatrixStack> mGet = CTX_MATRICES;
-        Function<Object, Vec3d> cGet = CTX_CAM_POS;
-        Function<Identifier, RenderLayer> rlGet = RENDER_LAYER_LOOKUP;
-        if (mGet == null || cGet == null || rlGet == null) return;
-
-        MatrixStack matrices = mGet.apply(ctx);
-        Vec3d cam = cGet.apply(ctx);
+    private static void onRender(WorldRenderContext ctx) {
+        MatrixStack matrices = ctx.matrices();
+        Vec3d cam = ctx.worldState().cameraRenderState.pos;
         if (matrices == null || cam == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
-        VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
+        VertexConsumerProvider consumers = ctx.consumers();
+        if (consumers == null) return;
 
         matrices.push();
         matrices.translate(-cam.x, -cam.y, -cam.z);
@@ -212,7 +68,6 @@ public final class VideoScreenRenderer {
 
         if (!CollinsClientConfig.get().renderVideo) {
             matrices.pop();
-            consumers.draw();
             return;
         }
 
@@ -221,13 +76,11 @@ public final class VideoScreenRenderer {
             if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
             screen.renderPlayback();
             if (!screen.hasTexture()) continue;
-            RenderLayer layer = rlGet.apply(screen.textureId());
-            if (layer == null) continue;
+            RenderLayer layer = RenderLayers.entityCutoutNoCullZOffset(screen.textureId());
             drawScreen(entry, consumers, cam, st, layer);
         }
 
         matrices.pop();
-        consumers.draw();
     }
 
     private static void drawScreen(MatrixStack.Entry entry,
