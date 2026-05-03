@@ -45,6 +45,8 @@ public final class VideoScreenRenderer {
     private static Function<Object, Vec3d> CTX_CAM_POS;
     private static Function<Identifier, RenderLayer> RENDER_LAYER_LOOKUP;
     private static volatile boolean renderLayerWarned = false;
+    private static int dispatchCount = 0;
+    private static int nullLayerLogCount = 0;
 
     private VideoScreenRenderer() {}
 
@@ -147,8 +149,12 @@ public final class VideoScreenRenderer {
     }
 
     private static void registerListener(Object event, Class<?> listenerIface) throws Exception {
+        // Use the listener interface's own classloader so Proxy can see it
+        // even if Fabric API ships in a separate module classloader.
+        ClassLoader cl = listenerIface.getClassLoader();
+        if (cl == null) cl = VideoScreenRenderer.class.getClassLoader();
         Object proxy = Proxy.newProxyInstance(
-            VideoScreenRenderer.class.getClassLoader(),
+            cl,
             new Class<?>[]{ listenerIface },
             (p, method, args) -> {
                 if (method.getDeclaringClass() == Object.class) {
@@ -243,6 +249,10 @@ public final class VideoScreenRenderer {
     // ----- Render hook -----------------------------------------------------
 
     private static void dispatch(Object ctx) {
+        if (dispatchCount < 3) {
+            dispatchCount++;
+            log("dispatch fired #" + dispatchCount + " ctx=" + (ctx == null ? "null" : ctx.getClass().getName()));
+        }
         try {
             onRender(ctx);
         } catch (Throwable t) {
@@ -285,7 +295,13 @@ public final class VideoScreenRenderer {
             screen.renderPlayback();
             if (!screen.hasTexture()) continue;
             RenderLayer layer = rlGet.apply(screen.textureId());
-            if (layer == null) continue;
+            if (layer == null) {
+                if (nullLayerLogCount < 3) {
+                    nullLayerLogCount++;
+                    log("render layer is null for textureId=" + screen.textureId() + " (screen will be skipped)");
+                }
+                continue;
+            }
             drawScreen(entry, consumers, cam, st, layer);
         }
 
