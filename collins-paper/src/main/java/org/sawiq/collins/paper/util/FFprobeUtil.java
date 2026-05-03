@@ -74,6 +74,17 @@ public class FFprobeUtil {
                 if (logger != null) {
                     logger.warning("FFprobe/yt-dlp error for " + shortenUrl(url) + ": " + e.getMessage());
                 }
+                // Cache the failure as "live-like" so the plugin's
+                // requestDurationIfNeeded() short-circuits via isKnownLive()
+                // and we don't spawn a fresh yt-dlp process every 10s for
+                // URLs whose duration cannot be parsed (e.g. some VK
+                // videos). Treating them as "live" is also the right
+                // user-facing behavior: playback works fine, we just
+                // don't know the length, so end-of-video detection is
+                // disabled for that screen until cache TTL expires.
+                if (url != null && !url.isBlank()) {
+                    DURATION_CACHE.put(url, new CachedDuration(0L, true, System.currentTimeMillis()));
+                }
                 return 0L;
             }
         });

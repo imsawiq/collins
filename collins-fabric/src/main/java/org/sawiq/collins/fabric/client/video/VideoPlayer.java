@@ -767,6 +767,18 @@ public final class VideoPlayer {
         running = false;
         sessionId = 0;
 
+        // Shut the audio line down BEFORE waiting for the playback thread.
+        // javax.sound.sampled lines are documented thread-safe and
+        // line.stop()/flush()/close() takes effect instantly, while the
+        // FFmpeg grab thread can be stuck for up to ~6s on a hung HLS
+        // socket. If we waited for the join first the user would hear
+        // up to 6 seconds (per screen) of buffered audio after disconnect
+        // -- which is exactly the symptom reported when leaving a server
+        // mid-playback.
+        VideoAudioPlayer a = currentAudio;
+        if (a != null) a.shutdownNow();
+        currentAudio = null;
+
         // We deliberately DO NOT call grabber.stop()/close() from this
         // (caller's) thread. FFmpegFrameGrabber buffers native AVFrame
         // memory that the playback thread may be reading from RIGHT NOW
@@ -794,10 +806,6 @@ public final class VideoPlayer {
         }
         thread = null;
         activeGrabber = null;
-
-        VideoAudioPlayer a = currentAudio;
-        if (a != null) a.shutdownNow();
-        currentAudio = null;
     }
 
     private void runLoop(String url, int blocksW, int blocksH, boolean loop, int preferredYoutubeHeight, long mySessionId) {

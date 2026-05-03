@@ -62,5 +62,15 @@ public final class CollinsFabricClient implements ClientModInitializer {
             VideoScreenManager.stopAll();
             CollinsNet.MODDED_PLAYERS.clear();
         });
+
+        // Belt-and-suspenders: also wipe state on JOIN. Velocity/BungeeCord
+        // proxy server switches sometimes don't fire DISCONNECT cleanly,
+        // and the new server's plugin sends a fresh SYNC anyway, so it is
+        // safe (and necessary) to drop any leftover screens/audio from the
+        // previous connection here.
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            VideoScreenManager.stopAll();
+            CollinsNet.MODDED_PLAYERS.clear();
+        });
     }
 }
