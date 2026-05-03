@@ -779,6 +779,16 @@ public final class VideoPlayer {
         if (a != null) a.shutdownNow();
         currentAudio = null;
 
+        // Kill any in-flight yt-dlp / ffmpeg subprocesses BEFORE waiting
+        // on the playback thread. Without this, stopping a video while
+        // its on-disk cache is still being downloaded leaves yt-dlp
+        // running for up to 30 minutes (its waitFor timeout) - the
+        // playback thread is stuck in BufferedReader.readLine() on the
+        // process pipe, which java.lang.Thread#interrupt does not unblock
+        // on most JDKs. Force-killing the child closes the pipe, the
+        // reader returns null, and the thread exits its loop within ms.
+        YouTubeResolver.cancelActiveDownloads();
+
         // We deliberately DO NOT call grabber.stop()/close() from this
         // (caller's) thread. FFmpegFrameGrabber buffers native AVFrame
         // memory that the playback thread may be reading from RIGHT NOW
@@ -886,16 +896,22 @@ public final class VideoPlayer {
             // Platform-aware preparing message. VideoScreen#onDownloadStart
             // parses the middle token (youtube/rutube/vk) to decide which
             // user-facing label to render in the HUD and screen overlay.
-            String prepareKey;
+            // The same token is reused for the yt-dlp bootstrap phase so
+            // the label does not flip to "YouTube" when the user is loading
+            // a VK/RuTube video on a fresh install.
+            String platformToken;
             if (YouTubeResolver.isYouTubeUrl(originalUrl)) {
-                prepareKey = "collins.video.youtube_preparing";
+                platformToken = "youtube";
             } else if (YouTubeResolver.isRuTubeUrl(originalUrl)) {
-                prepareKey = "collins.video.rutube_preparing";
+                platformToken = "rutube";
             } else if (YouTubeResolver.isVKUrl(originalUrl)) {
-                prepareKey = "collins.video.vk_preparing";
+                platformToken = "vk";
             } else {
-                prepareKey = "collins.video.preparing";
+                platformToken = "";
             }
+            String prepareKey = platformToken.isEmpty()
+                    ? "collins.video.preparing"
+                    : "collins.video." + platformToken + "_preparing";
             sink.onDownloadStart(prepareKey);
             YouTubeResolver.YouTubeResult ytResult = YouTubeResolver.resolve(originalUrl, preferredYoutubeHeight, sink);
             
@@ -906,7 +922,10 @@ public final class VideoPlayer {
             
             if (ytResult.needsDownload() && !YouTubeResolver.isYtdlpAvailable()) {
                 dbg("playOnce: yt-dlp not available, starting download...");
-                sink.onDownloadStart("collins.video.youtube_ytdlp_downloading");
+                String ytdlpKey = platformToken.isEmpty()
+                        ? "collins.video.ytdlp_downloading"
+                        : "collins.video." + platformToken + "_ytdlp_downloading";
+                sink.onDownloadStart(ytdlpKey);
                 sink.onDownloadProgress(0, 0, 0);
                 YouTubeResolver.downloadYtdlpAsync();
                 
