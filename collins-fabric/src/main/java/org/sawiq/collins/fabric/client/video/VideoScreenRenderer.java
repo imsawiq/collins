@@ -51,29 +51,56 @@ public final class VideoScreenRenderer {
     private VideoScreenRenderer() {}
 
     public static void init() {
-        // Prefer the new API shipped with 1.21.10+, then fall back to the
-        // legacy API present in 1.21.9 and below.
-        Class<?> newEvents = forNameOrNull("net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents");
-        if (newEvents != null) {
+        logEnvironment();
+
+        String[] candidates = {
+            // 1.21.10+
+            "net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents",
+            // 1.21.9 and earlier
+            "net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents",
+        };
+
+        for (String fqn : candidates) {
+            Class<?> cls;
             try {
-                setupModernApi(newEvents);
-                log("bound modern WorldRenderEvents (1.21.10+)");
-                return;
+                cls = Class.forName(fqn);
+            } catch (ClassNotFoundException e) {
+                log("probe " + fqn + " -> NOT PRESENT");
+                continue;
             } catch (Throwable t) {
-                warn("modern WorldRenderEvents bind failed", t);
+                warn("probe " + fqn + " threw " + t.getClass().getSimpleName(), t);
+                continue;
             }
-        }
-        Class<?> oldEvents = forNameOrNull("net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents");
-        if (oldEvents != null) {
+            log("probe " + fqn + " -> FOUND");
+            boolean modern = fqn.contains(".world.");
             try {
-                setupLegacyApi(oldEvents);
-                log("bound legacy WorldRenderEvents (1.21.9-)");
+                if (modern) {
+                    setupModernApi(cls);
+                    log("bound modern WorldRenderEvents (1.21.10+)");
+                } else {
+                    setupLegacyApi(cls);
+                    log("bound legacy WorldRenderEvents (1.21.9-)");
+                }
                 return;
             } catch (Throwable t) {
-                warn("legacy WorldRenderEvents bind failed", t);
+                warn((modern ? "modern" : "legacy") + " WorldRenderEvents bind failed", t);
             }
         }
         System.err.println("[Collins] No compatible WorldRenderEvents API found; video screens will not render.");
+    }
+
+    private static void logEnvironment() {
+        try {
+            FabricLoader fl = FabricLoader.getInstance();
+            log("env: development=" + fl.isDevelopmentEnvironment());
+            for (String id : new String[]{ "fabric-rendering-v1", "fabric-api", "fabricloader", "minecraft" }) {
+                fl.getModContainer(id).ifPresent(c ->
+                    log("env: " + id + "=" + c.getMetadata().getVersion().getFriendlyString())
+                );
+            }
+        } catch (Throwable t) {
+            warn("logEnvironment failed", t);
+        }
     }
 
     private static void log(String msg) {
