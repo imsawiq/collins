@@ -59,8 +59,7 @@ public final class VideoScreenRenderer {
         if (matrices == null || cam == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
-        VertexConsumerProvider consumers = ctx.consumers();
-        if (consumers == null) return;
+        VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
 
         matrices.push();
         matrices.translate(-cam.x, -cam.y, -cam.z);
@@ -68,6 +67,7 @@ public final class VideoScreenRenderer {
 
         if (!CollinsClientConfig.get().renderVideo) {
             matrices.pop();
+            consumers.draw();
             return;
         }
 
@@ -81,6 +81,7 @@ public final class VideoScreenRenderer {
         }
 
         matrices.pop();
+        consumers.draw();
     }
 
     private static void drawScreen(MatrixStack.Entry entry,
