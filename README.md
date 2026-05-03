@@ -1,7 +1,7 @@
 ![.](https://cdn.modrinth.com/data/cached_images/cbf9d31899fe7928e15d74e51a10823c287a1fff.png)
 
 [![Github](https://cdn.modrinth.com/data/cached_images/98785f1d471df1a7aceee62cd2c715d80de8e1bd.png)](https://github.com/imsawiq/collins/releases/tag/0.1.0)
-[![Discord](https://cdn.modrinth.com/data/cached_images/ce03caef41db32fe933e0a8ec6e8aca70775418d.png)](https://discord.com/invite/nPbxmeTnBQ)
+[![Discord](https://cdn.modrinth.com/data/cached_images/ce03caef41db32fe933e0a8ec6e8aca70775418d.png)](https://discord.gg/jsH9bGj2NU)
 [![Telegram](https://cdn.modrinth.com/data/cached_images/226d7052633712f6e671b07b6180ec6b12d13068.png)](https://t.me/sawiqp)
 
 Monorepo containing the **Collins** video screens system for Minecraft.

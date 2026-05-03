@@ -8,7 +8,8 @@
   "icon": "assets/collins-fabric/icon.png",
   "contact": {
     "sources": "https://github.com/imsawiq/collins",
-    "issues": "https://github.com/imsawiq/collins/issues"
+    "issues": "https://github.com/imsawiq/collins/issues",
+    "discord": "https://discord.gg/jsH9bGj2NU"
   },
   "license": "MIT",
   "environment": "*",
