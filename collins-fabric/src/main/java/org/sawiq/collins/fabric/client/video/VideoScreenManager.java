@@ -319,7 +319,7 @@ public final class VideoScreenManager {
             stopAllPlayback();
         }
 
-        Vec3d pos = p.getPos();
+        Vec3d pos = p.getEntityPos();
         int radius = CollinsNet.HEAR_RADIUS;
         float globalVolume = CollinsNet.GLOBAL_VOLUME;
         long serverNowMs = estimateServerNowMs();

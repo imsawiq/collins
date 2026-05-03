@@ -1,14 +1,15 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
+import net.minecraft.client.render.state.CameraRenderState;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
@@ -23,18 +24,22 @@ public final class VideoScreenRenderer {
     private VideoScreenRenderer() {}
 
     public static void init() {
-        WorldRenderEvents.LAST.register(VideoScreenRenderer::onLast);
+        // 1.21.10+ split the legacy LAST event into separate extraction and
+        // main-pass phases. END_MAIN runs at the very end of the main world
+        // render pass with the same camera-relative matrix that vanilla
+        // entities are drawn in, which is exactly what we want for screens.
+        WorldRenderEvents.END_MAIN.register(VideoScreenRenderer::onEndMain);
     }
 
-    private static void onLast(WorldRenderContext ctx) {
-        MatrixStack matrices = ctx.matrixStack();
-        Camera camera = ctx.camera();
-        if (matrices == null || camera == null) return;
+    private static void onEndMain(WorldRenderContext ctx) {
+        MatrixStack matrices = ctx.matrices();
+        CameraRenderState cameraState = ctx.worldState() != null ? ctx.worldState().cameraRenderState : null;
+        if (matrices == null || cameraState == null || cameraState.pos == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
         VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
 
-        Vec3d cam = camera.getPos();
+        Vec3d cam = cameraState.pos;
 
         matrices.push();
         matrices.translate(-cam.x, -cam.y, -cam.z);
@@ -65,7 +70,7 @@ public final class VideoScreenRenderer {
                                    ScreenState s,
                                    Identifier textureId) {
 
-        RenderLayer layer = RenderLayer.getEntityCutoutNoCullZOffset(textureId);
+        RenderLayer layer = RenderLayers.entityCutoutNoCullZOffset(textureId);
         VertexConsumer vc = consumers.getBuffer(layer);
 
         int minX = s.minX(), maxX = s.maxX();

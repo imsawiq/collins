@@ -119,7 +119,7 @@ public final class CollinsClientCommands {
 
         String path = VideoScreenManager.getPendingDeletePath();
         if (path == null || path.isEmpty()) {
-            VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getPos());
+            VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getEntityPos());
             if (screen != null && screen.hasCachedFile()) {
                 path = screen.getCachedFilePath();
             }
@@ -165,7 +165,7 @@ public final class CollinsClientCommands {
         if (screenName != null && !screenName.isBlank()) {
             screen = VideoScreenManager.getByName(screenName);
         } else {
-            screen = VideoScreenManager.findNearestPlaying(client.player.getPos());
+            screen = VideoScreenManager.findNearestPlaying(client.player.getEntityPos());
         }
 
         if (screen == null) {

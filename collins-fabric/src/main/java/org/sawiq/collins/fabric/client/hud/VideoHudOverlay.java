@@ -25,7 +25,7 @@ public final class VideoHudOverlay {
         if (client.player == null || client.textRenderer == null) return;
         if (client.currentScreen instanceof ChatScreen) return;
 
-        VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getPos());
+        VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getEntityPos());
         if (screen == null) return;
 
         int sw = client.getWindow().getScaledWidth();

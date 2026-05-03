@@ -15,11 +15,11 @@ public abstract class PlayerListHudMixin {
 
     @Inject(method = "getPlayerName", at = @At("RETURN"), cancellable = true)
     private void collins$appendModMarker(PlayerListEntry entry, CallbackInfoReturnable<Text> cir) {
-        if (!CollinsNet.hasCollinsMod(entry.getProfile().getId())) {
+        if (!CollinsNet.hasCollinsMod(entry.getProfile().id())) {
             return;
         }
 
-        Formatting color = CollinsNet.hasOutdatedCollinsMod(entry.getProfile().getId())
+        Formatting color = CollinsNet.hasOutdatedCollinsMod(entry.getProfile().id())
                 ? Formatting.RED
                 : Formatting.GREEN;
         cir.setReturnValue(cir.getReturnValue().copy().append(Text.literal(" 🎥").formatted(color)));
