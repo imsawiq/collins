@@ -75,7 +75,11 @@ public final class CollinsMessenger {
         if (broadcastScheduled) return;
         broadcastScheduled = true;
 
-        Bukkit.getScheduler().runTask(plugin, () -> {
+        // Folia-safe: coalesce broadcasts on the global region tick instead
+        // of BukkitScheduler (unsupported on Folia). Plugin messaging and
+        // iterating Bukkit.getOnlinePlayers() are fine from the global
+        // region thread.
+        Bukkit.getGlobalRegionScheduler().execute(plugin, () -> {
             broadcastScheduled = false;
             broadcastSync();
         });

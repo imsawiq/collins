@@ -1,11 +1,11 @@
 package org.sawiq.collins.paper.selection;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Location;
 import org.bukkit.Particle;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitTask;
 
 import java.util.Map;
 import java.util.UUID;
@@ -14,15 +14,15 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class SelectionVisualizer {
     private SelectionVisualizer() {}
 
-    private static final Map<UUID, BukkitTask> TASKS = new ConcurrentHashMap<>();
+    private static final Map<UUID, ScheduledTask> TASKS = new ConcurrentHashMap<>();
 
     private static final double OUT = 0.65;
     private static final double UP = 0.15;
     private static final double STEP = 0.35;
 
     public static void stop(Player player) {
-        BukkitTask old = TASKS.remove(player.getUniqueId());
-        if (old != null) old.cancel(); // отмена повторяющейся задачи [web:278]
+        ScheduledTask old = TASKS.remove(player.getUniqueId());
+        if (old != null) old.cancel(); // отмена повторяющейся задачи (Folia-safe)
     }
 
     public static void showFrame(JavaPlugin plugin, Player player,
@@ -44,7 +44,10 @@ public final class SelectionVisualizer {
 
         final long[] left = { durationTicks };
 
-        BukkitTask task = plugin.getServer().getScheduler().runTaskTimer(plugin, () -> {
+        // Folia-safe: use the entity scheduler so the particle task runs on
+        // the player's region every time the player moves. On Paper this
+        // falls back to the main-thread scheduler transparently.
+        ScheduledTask task = player.getScheduler().runAtFixedRate(plugin, t -> {
             if (!player.isOnline() || left[0]-- <= 0) {
                 stop(player);
                 return;
@@ -54,9 +57,11 @@ public final class SelectionVisualizer {
             else if (isXZ) drawFrameXZ(player, w, minX, minZ, maxX, maxZ, minY);
             else if (isYZ) drawFrameYZ(player, w, minY, minZ, maxY, maxZ, minX);
             else drawBoxFallback(player, w, minX, minY, minZ, maxX, maxY, maxZ);
-        }, 0L, 10L); // повторяющаяся задача, пока не отменим [web:278]
+        }, () -> TASKS.remove(player.getUniqueId()), 1L, 10L); // initial delay must be >= 1 on Folia
 
-        TASKS.put(player.getUniqueId(), task);
+        if (task != null) {
+            TASKS.put(player.getUniqueId(), task);
+        }
     }
 
     private static void drawFrameXY(Player p, World w,

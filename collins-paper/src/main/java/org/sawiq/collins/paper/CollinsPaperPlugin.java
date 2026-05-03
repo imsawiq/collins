@@ -95,11 +95,15 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         FFprobeUtil.init(getLogger(), ffprobePath, ytdlpPath, getConfig().getInt("ffprobe.timeout", 30));
 
         int endCheckIntervalTicks = Math.max(1, getConfig().getInt("video.endCheckIntervalTicks", 10));
-        Bukkit.getScheduler().runTaskTimer(this, this::checkVideoEndings, endCheckIntervalTicks, endCheckIntervalTicks);
+        // Folia-safe: use the global region scheduler instead of the legacy
+        // BukkitScheduler which is unsupported on Folia. On Paper this is a
+        // thin shim that runs on the main server thread, so behavior is
+        // identical.
+        Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, t -> checkVideoEndings(), endCheckIntervalTicks, endCheckIntervalTicks);
 
         int syncBroadcastIntervalTicks = Math.max(0, getConfig().getInt("video.syncBroadcastIntervalTicks", 20));
         if (syncBroadcastIntervalTicks > 0) {
-            Bukkit.getScheduler().runTaskTimer(this, this::broadcastActiveSync, syncBroadcastIntervalTicks, syncBroadcastIntervalTicks);
+            Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, t -> broadcastActiveSync(), syncBroadcastIntervalTicks, syncBroadcastIntervalTicks);
         }
 
         for (Screen screen : store.all()) {
@@ -114,7 +118,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             // Hop back to the main thread before logging - keeps us
             // consistent with how we touch any Bukkit state from async
             // tasks elsewhere in the plugin.
-            Bukkit.getScheduler().runTask(this, () -> {
+            Bukkit.getGlobalRegionScheduler().execute(this, () -> {
                 pendingUpdate = result;
                 getLogger().info("Update available on Modrinth: "
                         + result.version() + " (current: "
@@ -132,7 +136,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             if (result == null || result.version() == null || result.version().isBlank()) {
                 return;
             }
-            Bukkit.getScheduler().runTask(this, () -> {
+            Bukkit.getGlobalRegionScheduler().execute(this, () -> {
                 latestFabricVersion = result.version();
                 refreshOutdatedModdedPlayers();
                 messenger.requestBroadcastSync();
@@ -300,7 +304,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             if (durationMs <= 0) {
                 return;
             }
-            Bukkit.getScheduler().runTask(this, () -> {
+            Bukkit.getGlobalRegionScheduler().execute(this, () -> {
                 Screen current = store.get(screenName);
                 if (current == null) {
                     return;
@@ -364,17 +368,21 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
-        Bukkit.getScheduler().runTaskLater(this, () -> messenger.sendSync(e.getPlayer()), 20L);
+        // Per-player delayed tasks must run on the entity scheduler so that
+        // Folia dispatches them to the player's current region. On Paper
+        // this is a shim that behaves identically to runTaskLater.
+        var player = e.getPlayer();
+        player.getScheduler().runDelayed(this, t -> messenger.sendSync(player), null, 20L);
 
         // Notify the OP about a pending Modrinth update once per
         // server lifetime. Delayed two seconds so the message lands AFTER
         // Paper's own join messages (otherwise it can be hidden by the
         // motd / spawn chat scroll).
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (e.getPlayer().isOnline()) {
-                notifyAdminIfNeeded(e.getPlayer());
+        player.getScheduler().runDelayed(this, t -> {
+            if (player.isOnline()) {
+                notifyAdminIfNeeded(player);
             }
-        }, 40L);
+        }, null, 40L);
     }
 
     @EventHandler
