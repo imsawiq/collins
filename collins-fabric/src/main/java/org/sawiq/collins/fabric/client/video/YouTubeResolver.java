@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -28,6 +30,37 @@ import java.util.zip.ZipInputStream;
  */
 public final class YouTubeResolver {
     private static final String META_PREFIX = "CollinsMeta:";
+
+    /**
+     * Live set of yt-dlp / ffmpeg subprocesses that {@link VideoPlayer#stop()}
+     * may need to terminate. Without this, stopping a video mid-download
+     * left the yt-dlp process running for up to 30 minutes (its waitFor
+     * timeout) writing to the on-disk cache, holding native pipes, and
+     * occasionally racing with a fresh playback session for the same
+     * cache file. Membership is bounded by the number of in-flight
+     * downloads, which is at most one per VideoPlayer instance.
+     */
+    private static final Set<Process> ACTIVE_DOWNLOAD_PROCESSES = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Forcibly terminates every yt-dlp / ffmpeg subprocess that is
+     * currently downloading or probing a stream. Idempotent and safe to
+     * call from any thread; called by {@link VideoPlayer#stop()} so a
+     * user-initiated stop releases native resources immediately rather
+     * than waiting for the in-flight download to complete.
+     */
+    public static void cancelActiveDownloads() {
+        // Snapshot first; do NOT clear() here - each process removes itself
+        // from the registry in its own finally block, which avoids a race
+        // where a freshly-started download is wiped from the set before its
+        // owning thread can track it.
+        for (Process p : ACTIVE_DOWNLOAD_PROCESSES.toArray(new Process[0])) {
+            try {
+                p.destroyForcibly();
+            } catch (Exception ignored) {
+            }
+        }
+    }
     private static final Pattern DOWNLOAD_PROGRESS_PATTERN = Pattern.compile(".*?(\\d{1,3}(?:\\.\\d+)?)%.*?of\\s+~?\\s*(\\d+(?:\\.\\d+)?)(?:\\s*)(B|KiB|MiB|GiB|TiB).*");
     private static final Pattern DOWNLOAD_PERCENT_PATTERN = Pattern.compile(".*?(\\d{1,3}(?:\\.\\d+)?)%.*");
     private static final Pattern DOWNLOAD_SIZE_PATTERN = Pattern.compile(".*?(\\d+(?:\\.\\d+)?)(?:\\s*)(B|KiB|MiB|GiB|TiB).*");
@@ -762,14 +795,19 @@ public final class YouTubeResolver {
             // the correct label (YouTube / RuTube / VK) instead of always
             // showing "YouTube: downloading...".
             String downloadingKey = switch (platform) {
+                case YOUTUBE -> "collins.video.youtube_downloading";
                 case RUTUBE -> "collins.video.rutube_downloading";
                 case VK -> "collins.video.vk_downloading";
-                default -> "collins.video.youtube_downloading";
+                // Twitch goes through direct HLS and shouldn't normally hit
+                // downloadVodToCache, but if it ever does, fall back to a
+                // generic label rather than mislabelling the stream as YouTube.
+                case TWITCH -> "collins.video.downloading";
             };
             sink.onDownloadStart(downloadingKey);
         }
 
         Process p = pb.start();
+        ACTIVE_DOWNLOAD_PROCESSES.add(p);
         StringBuilder output = new StringBuilder();
         String finalPath = null;
         long durationMs = 0L;
@@ -815,7 +853,15 @@ public final class YouTubeResolver {
             }
         }
 
-        boolean finished = p.waitFor(30, TimeUnit.MINUTES);
+        boolean finished;
+        try {
+            finished = p.waitFor(30, TimeUnit.MINUTES);
+        } finally {
+            // Always evict from the active-process registry so that a later
+            // cancelActiveDownloads() doesn't try to destroy an already-dead
+            // pid (typically harmless but creates noisy logs on some JDKs).
+            ACTIVE_DOWNLOAD_PROCESSES.remove(p);
+        }
         monitorRunning.set(false);
         if (progressMonitor != null) {
             progressMonitor.interrupt();
@@ -1048,6 +1094,52 @@ public final class YouTubeResolver {
         }
     }
 
+    private record ProcessResult(int exitCode, boolean timedOut, String output) {
+    }
+
+    private static ProcessResult runYtdlpCommand(List<String> command, long timeout, TimeUnit unit, String threadName) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+        ACTIVE_DOWNLOAD_PROCESSES.add(process);
+
+        StringBuilder output = new StringBuilder();
+        Thread readerThread = new Thread(() -> {
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append('\n');
+                }
+            } catch (Exception ignored) {
+            }
+        }, threadName);
+        readerThread.setDaemon(true);
+        readerThread.start();
+
+        boolean finished;
+        try {
+            finished = process.waitFor(timeout, unit);
+        } finally {
+            ACTIVE_DOWNLOAD_PROCESSES.remove(process);
+        }
+
+        if (!finished) {
+            process.destroyForcibly();
+            try {
+                process.waitFor(3, TimeUnit.SECONDS);
+            } catch (Exception ignored) {
+            }
+        }
+
+        try {
+            readerThread.join(1500L);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        return new ProcessResult(finished ? process.exitValue() : -1, !finished, output.toString());
+    }
+
     private static StreamMeta resolveStreamMeta(String url, boolean youtube) throws Exception {
         List<String> command = new ArrayList<>();
         command.add(getYtdlpPath().toString());
@@ -1072,30 +1164,21 @@ public final class YouTubeResolver {
         }
         command.add(url);
 
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
-        StringBuilder output = new StringBuilder();
+        ProcessResult result = runYtdlpCommand(command, 15, TimeUnit.SECONDS, "Collins-YTDLP-Meta");
+        String output = result.output();
         StreamMeta meta = null;
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append('\n');
-                String trimmed = line.trim();
-                if (trimmed.startsWith(META_PREFIX)) {
-                    meta = parsePrintedStreamMeta(trimmed);
-                }
+        for (String line : output.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith(META_PREFIX)) {
+                meta = parsePrintedStreamMeta(trimmed);
             }
         }
 
-        boolean finished = process.waitFor(15, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
+        if (result.timedOut()) {
             throw new Exception("yt-dlp metadata timeout");
         }
-        if (process.exitValue() != 0) {
-            String err = output.toString().trim();
+        if (result.exitCode() != 0) {
+            String err = output.trim();
             if (err.length() > 300) {
                 err = err.substring(0, 300) + "...";
             }
@@ -1135,30 +1218,21 @@ public final class YouTubeResolver {
         }
         command.add(url);
 
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
-        Process process = pb.start();
-
+        ProcessResult result = runYtdlpCommand(command, 15, TimeUnit.SECONDS, "Collins-YTDLP-Direct");
         String directUrl = null;
-        StringBuilder output = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                String trimmed = line.trim();
-                output.append(trimmed).append('\n');
-                if (directUrl == null && (trimmed.startsWith("http://") || trimmed.startsWith("https://"))) {
-                    directUrl = trimmed;
-                }
+        String output = result.output();
+        for (String line : output.split("\\R")) {
+            String trimmed = line.trim();
+            if (directUrl == null && (trimmed.startsWith("http://") || trimmed.startsWith("https://"))) {
+                directUrl = trimmed;
             }
         }
 
-        boolean finished = process.waitFor(15, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
+        if (result.timedOut()) {
             throw new Exception("yt-dlp direct URL timeout");
         }
-        if (process.exitValue() != 0 || directUrl == null || directUrl.isBlank()) {
-            String err = output.toString().trim();
+        if (result.exitCode() != 0 || directUrl == null || directUrl.isBlank()) {
+            String err = output.trim();
             if (err.length() > 200) {
                 err = err.substring(0, 200) + "...";
             }
@@ -1481,29 +1555,23 @@ public final class YouTubeResolver {
             addOptionalYouTubeAuthArgs(command);
             command.add(videoUrl);
 
-            ProcessBuilder pb = new ProcessBuilder(command);
-            pb.redirectErrorStream(true);
-            Process process = pb.start();
+            ProcessResult result = runYtdlpCommand(command, 20, TimeUnit.SECONDS, "Collins-YTDLP-Size");
             long totalBytes = 0L;
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
+            if (!result.timedOut() && result.exitCode() == 0) {
+                for (String line : result.output().split("\\R")) {
                     String trimmed = line.trim();
-                    if (trimmed.startsWith("CollinsYTMeta:")) {
-                        String payload = trimmed.substring("CollinsYTMeta:".length());
-                        String[] parts = payload.split(":", -1);
-                        long exactBytes = parts.length > 0 ? parseLongSafe(parts[0]) : 0L;
-                        long approxBytes = parts.length > 1 ? parseLongSafe(parts[1]) : 0L;
-                        totalBytes = exactBytes > 0 ? exactBytes : approxBytes;
-                        if (totalBytes > 0) {
-                            break;
-                        }
+                    if (!trimmed.startsWith("CollinsYTMeta:")) {
+                        continue;
+                    }
+                    String payload = trimmed.substring("CollinsYTMeta:".length());
+                    String[] parts = payload.split(":", -1);
+                    long exactBytes = parts.length > 0 ? parseLongSafe(parts[0]) : 0L;
+                    long approxBytes = parts.length > 1 ? parseLongSafe(parts[1]) : 0L;
+                    totalBytes = exactBytes > 0 ? exactBytes : approxBytes;
+                    if (totalBytes > 0) {
+                        break;
                     }
                 }
-            }
-            process.waitFor(20, TimeUnit.SECONDS);
-            if (process.isAlive()) {
-                process.destroyForcibly();
             }
             return totalBytes;
         } catch (Exception e) {
@@ -1609,15 +1677,10 @@ public final class YouTubeResolver {
 
         try {
             Path ytdlp = getYtdlpPath();
-            ProcessBuilder pb = new ProcessBuilder(ytdlp.toString(), "--version");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String version = reader.readLine();
-                p.waitFor(5, TimeUnit.SECONDS);
-                return version != null ? version.trim() : "unknown";
-            }
+            ProcessResult result = runYtdlpCommand(List.of(ytdlp.toString(), "--version"), 5, TimeUnit.SECONDS, "Collins-YTDLP-Version");
+            if (result.timedOut()) return "timeout";
+            String version = result.output().lines().findFirst().orElse(null);
+            return version != null ? version.trim() : "unknown";
         } catch (Exception e) {
             return "error: " + e.getMessage();
         }
@@ -1628,17 +1691,8 @@ public final class YouTubeResolver {
 
         try {
             Path ytdlp = getYtdlpPath();
-            ProcessBuilder pb = new ProcessBuilder(ytdlp.toString(), "-U");
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                while (reader.readLine() != null) {
-                }
-            }
-
-            boolean finished = p.waitFor(120, TimeUnit.SECONDS);
-            return finished && p.exitValue() == 0;
+            ProcessResult result = runYtdlpCommand(List.of(ytdlp.toString(), "-U"), 120, TimeUnit.SECONDS, "Collins-YTDLP-Update");
+            return !result.timedOut() && result.exitCode() == 0;
         } catch (Exception e) {
             dbg("updateYtdlp: error " + e.getMessage());
             return false;
