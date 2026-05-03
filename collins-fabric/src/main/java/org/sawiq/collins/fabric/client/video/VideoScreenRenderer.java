@@ -1,5 +1,7 @@
 package org.sawiq.collins.fabric.client.video;
 
+import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.MappingResolver;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
@@ -53,6 +55,7 @@ public final class VideoScreenRenderer {
         if (newEvents != null) {
             try {
                 setupModernApi(newEvents);
+                log("bound modern WorldRenderEvents (1.21.10+)");
                 return;
             } catch (Throwable t) {
                 warn("modern WorldRenderEvents bind failed", t);
@@ -62,12 +65,17 @@ public final class VideoScreenRenderer {
         if (oldEvents != null) {
             try {
                 setupLegacyApi(oldEvents);
+                log("bound legacy WorldRenderEvents (1.21.9-)");
                 return;
             } catch (Throwable t) {
                 warn("legacy WorldRenderEvents bind failed", t);
             }
         }
         System.err.println("[Collins] No compatible WorldRenderEvents API found; video screens will not render.");
+    }
+
+    private static void log(String msg) {
+        System.out.println("[Collins] VideoScreenRenderer: " + msg);
     }
 
     // ----- API bindings ----------------------------------------------------
@@ -175,42 +183,61 @@ public final class VideoScreenRenderer {
         return null;
     }
 
-    @SuppressWarnings("unchecked")
     private static Function<Identifier, RenderLayer> resolveRenderLayerLookup() {
-        // 1.21.10+: RenderLayers.entityCutoutNoCullZOffset(Identifier)
-        try {
-            Class<?> rls = Class.forName("net.minecraft.client.render.RenderLayers");
-            for (Method m : rls.getMethods()) {
-                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
-                if (m.getParameterCount() != 1) continue;
-                if (m.getParameterTypes()[0] != Identifier.class) continue;
-                if (m.getReturnType() != RenderLayer.class) continue;
-                String lower = m.getName().toLowerCase(java.util.Locale.ROOT);
-                if (lower.contains("entitycutoutnocullzoffset")) {
-                    return id -> {
-                        try { return (RenderLayer) m.invoke(null, id); } catch (Exception e) { return null; }
-                    };
-                }
-            }
-        } catch (Throwable ignored) {
+        // The vanilla method that produces our entity-cutout layer was both
+        // moved (RenderLayer -> RenderLayers) and renumbered between 1.21.9
+        // and 1.21.10. We resolve the runtime name for each candidate via
+        // MappingResolver instead of guessing yarn names, because in
+        // production all method names are obfuscated and a yarn-name probe
+        // would always miss.
+        MappingResolver mr = FabricLoader.getInstance().getMappingResolver();
+        String idDesc = "(Lnet/minecraft/class_2960;)Lnet/minecraft/class_1921;";
+
+        // 1.21.10+: net.minecraft.client.render.RenderLayers#entityCutoutNoCullZOffset
+        Function<Identifier, RenderLayer> modern = tryStaticByIntermediary(
+            mr, "net.minecraft.class_12249", "method_75996", idDesc);
+        if (modern != null) {
+            log("render layer: bound RenderLayers.entityCutoutNoCullZOffset (modern)");
+            return modern;
         }
-        // 1.21.9 and earlier: RenderLayer.getEntityCutoutNoCullZOffset(Identifier)
-        try {
-            for (Method m : RenderLayer.class.getMethods()) {
-                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
-                if (m.getParameterCount() != 1) continue;
-                if (m.getParameterTypes()[0] != Identifier.class) continue;
-                if (m.getReturnType() != RenderLayer.class) continue;
-                String lower = m.getName().toLowerCase(java.util.Locale.ROOT);
-                if (lower.contains("entitycutoutnocullzoffset")) {
-                    return id -> {
-                        try { return (RenderLayer) m.invoke(null, id); } catch (Exception e) { return null; }
-                    };
-                }
-            }
-        } catch (Throwable ignored) {
+
+        // 1.21.9 and earlier: net.minecraft.client.render.RenderLayer#getEntityCutoutNoCullZOffset
+        Function<Identifier, RenderLayer> legacy = tryStaticByIntermediary(
+            mr, "net.minecraft.class_1921", "method_28116", idDesc);
+        if (legacy != null) {
+            log("render layer: bound RenderLayer.getEntityCutoutNoCullZOffset (legacy)");
+            return legacy;
         }
+
+        warn("render layer: no compatible vanilla method found", null);
         return id -> null;
+    }
+
+    private static Function<Identifier, RenderLayer> tryStaticByIntermediary(
+            MappingResolver mr, String intermediaryClass, String intermediaryMethod, String intermediaryDesc) {
+        try {
+            String runtimeClassName = mr.mapClassName("intermediary", intermediaryClass);
+            Class<?> cls = Class.forName(runtimeClassName);
+            String runtimeMethodName = mr.mapMethodName(
+                "intermediary", intermediaryClass, intermediaryMethod, intermediaryDesc);
+            for (Method m : cls.getMethods()) {
+                if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                if (!m.getName().equals(runtimeMethodName)) continue;
+                if (m.getParameterCount() != 1) continue;
+                if (m.getParameterTypes()[0] != Identifier.class) continue;
+                if (m.getReturnType() != RenderLayer.class) continue;
+                final Method bound = m;
+                return id -> {
+                    try {
+                        return (RenderLayer) bound.invoke(null, id);
+                    } catch (Exception e) {
+                        return null;
+                    }
+                };
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     // ----- Render hook -----------------------------------------------------
@@ -391,7 +418,7 @@ public final class VideoScreenRenderer {
     }
 
     private static void warn(String context, Throwable t) {
-        System.err.println("[Collins] VideoScreenRenderer: " + context + ": " + t);
-        t.printStackTrace();
+        System.err.println("[Collins] VideoScreenRenderer: " + context + (t != null ? ": " + t : ""));
+        if (t != null) t.printStackTrace();
     }
 }
