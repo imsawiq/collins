@@ -1,5 +1,7 @@
 package org.sawiq.collins.fabric.client.video;
 
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.Camera;
 import net.minecraft.client.render.LightmapTextureManager;
@@ -12,7 +14,6 @@ import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
-import org.sawiq.collins.fabric.client.render.CollinsWorldRenderEvents;
 import org.sawiq.collins.fabric.client.state.ScreenState;
 
 public final class VideoScreenRenderer {
@@ -22,15 +23,12 @@ public final class VideoScreenRenderer {
     private VideoScreenRenderer() {}
 
     public static void init() {
-        // Subscribe to our custom "end of world rendering" event, which is
-        // wired up from WorldRendererMixin. We deliberately avoid Fabric's
-        // WorldRenderEvents here: that class was deleted from Fabric API
-        // in the 1.21.9 / 1.21.10 release with no replacement, so any
-        // static reference would break loading on those versions.
-        CollinsWorldRenderEvents.registerLast(VideoScreenRenderer::render);
+        WorldRenderEvents.LAST.register(VideoScreenRenderer::onLast);
     }
 
-    private static void render(MatrixStack matrices, Camera camera) {
+    private static void onLast(WorldRenderContext ctx) {
+        MatrixStack matrices = ctx.matrixStack();
+        Camera camera = ctx.camera();
         if (matrices == null || camera == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
