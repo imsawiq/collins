@@ -290,7 +290,28 @@ public final class VideoScreenManager {
 
     public static void tick(MinecraftClient client) {
         PlayerEntity p = client.player;
-        if (p == null) return;
+
+        // Independent watchdog. We cannot rely solely on
+        // ClientPlayConnectionEvents.DISCONNECT because some mods
+        // (notably Replay Mod, which records server packets and intercepts
+        // network teardown) delay or swallow that event entirely - the user
+        // reported audio bleeding through for the full duration of the
+        // recording finalization. Whenever the client is no longer in any
+        // world (title screen, disconnect, server-switch transition,
+        // singleplayer save-and-quit), there is no legitimate reason for
+        // any Collins screen to keep playing, so we drop everything.
+        if (p == null || client.world == null) {
+            if (!SCREENS.isEmpty()) {
+                stopAll();
+                lastClientWorldKey = "";
+            } else {
+                // Even with no screens we may still have a stale audio
+                // line from a player that was just removed from SCREENS
+                // by a previous tick or disconnect hook.
+                VideoAudioPlayer.shutdownAll();
+            }
+            return;
+        }
 
         String worldKey = currentWorldKey(client);
         if (!worldKey.equals(lastClientWorldKey)) {
