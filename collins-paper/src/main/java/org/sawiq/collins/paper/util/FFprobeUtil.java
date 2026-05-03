@@ -31,6 +31,22 @@ public class FFprobeUtil {
     }
 
     private static final Map<String, CachedDuration> DURATION_CACHE = new ConcurrentHashMap<>();
+
+    /**
+     * Negative cache for URLs whose duration cannot be probed (yt-dlp/
+     * ffprobe both fail). Stored separately from {@link #DURATION_CACHE}
+     * so we never falsely mark a finite-length video as a live stream
+     * (doing so would permanently disable end-of-video detection on the
+     * server and leave {@code screen.playing()=true} forever).
+     *
+     * <p>TTL is intentionally short: long enough to keep logs quiet
+     * (no fresh yt-dlp process every 10s) but short enough that an
+     * eventual yt-dlp upgrade or platform fix will be picked up
+     * automatically without a server restart.
+     */
+    private static final long FAILURE_CACHE_TTL_MS = 10L * 60L * 1000L;
+    private static final Map<String, Long> FAILURE_CACHE = new ConcurrentHashMap<>();
+
     private static Logger logger;
     private static String configFfprobePath = "";
     private static String configYtdlpPath = "";
@@ -62,32 +78,43 @@ public class FFprobeUtil {
         if (cached != null) {
             return CompletableFuture.completedFuture(cached.durationMs());
         }
+        if (isFailureCached(url)) {
+            return CompletableFuture.completedFuture(0L);
+        }
 
         return CompletableFuture.supplyAsync(() -> {
             try {
-                ProbeResult result = isYtDlpUrl(url) ? getDurationViaYtDlp(url) : getDurationViaFFprobe(url);
+                ProbeResult result = isYtDlpUrl(url) ? probeYtDlpWithFallback(url) : getDurationViaFFprobe(url);
                 if (url != null && !url.isBlank()) {
                     DURATION_CACHE.put(url, new CachedDuration(result.durationMs(), result.live(), System.currentTimeMillis()));
+                    FAILURE_CACHE.remove(url);
                 }
                 return result.durationMs();
             } catch (Exception e) {
                 if (logger != null) {
                     logger.warning("FFprobe/yt-dlp error for " + shortenUrl(url) + ": " + e.getMessage());
                 }
-                // Cache the failure as "live-like" so the plugin's
-                // requestDurationIfNeeded() short-circuits via isKnownLive()
-                // and we don't spawn a fresh yt-dlp process every 10s for
-                // URLs whose duration cannot be parsed (e.g. some VK
-                // videos). Treating them as "live" is also the right
-                // user-facing behavior: playback works fine, we just
-                // don't know the length, so end-of-video detection is
-                // disabled for that screen until cache TTL expires.
+                // Negative cache (FAILURE_CACHE) - NOT the duration cache.
+                // Stops log spam without flagging the URL as a live stream,
+                // because doing the latter would make isVideoEnded() return
+                // false forever and pin screen.playing()=true.
                 if (url != null && !url.isBlank()) {
-                    DURATION_CACHE.put(url, new CachedDuration(0L, true, System.currentTimeMillis()));
+                    FAILURE_CACHE.put(url, System.currentTimeMillis());
                 }
                 return 0L;
             }
         });
+    }
+
+    private static boolean isFailureCached(String url) {
+        if (url == null || url.isBlank()) return false;
+        Long failedAtMs = FAILURE_CACHE.get(url);
+        if (failedAtMs == null) return false;
+        if (System.currentTimeMillis() - failedAtMs > FAILURE_CACHE_TTL_MS) {
+            FAILURE_CACHE.remove(url);
+            return false;
+        }
+        return true;
     }
 
     public static long getCachedDurationMs(String url) {
@@ -130,6 +157,73 @@ public class FFprobeUtil {
             || lower.contains("vk.com/video")
             || lower.contains("vk.com/clip")
             || lower.contains("vk.com/video_ext.php");
+    }
+
+    /**
+     * Probe duration via yt-dlp with a fallback path. The primary path
+     * uses {@code --dump-single-json} which produces a JSON object that
+     * we can parse for {@code duration}/{@code is_live}. Some platforms
+     * (notably VK for certain video IDs) fail JSON metadata extraction
+     * even though the underlying media stream is fine; for those we
+     * fall back to {@code yt-dlp -g} (resolve direct stream URL) and
+     * then ffprobe the resolved stream for its container duration.
+     */
+    private static ProbeResult probeYtDlpWithFallback(String url) throws Exception {
+        Exception primary;
+        try {
+            return getDurationViaYtDlp(url);
+        } catch (Exception e) {
+            primary = e;
+        }
+
+        try {
+            String resolved = resolveStreamUrlViaYtDlp(url);
+            if (resolved == null || resolved.isBlank()) {
+                throw new Exception("yt-dlp -g returned empty");
+            }
+            return getDurationViaFFprobe(resolved);
+        } catch (Exception fallback) {
+            throw new Exception(primary.getMessage() + "; fallback failed: " + fallback.getMessage());
+        }
+    }
+
+    private static String resolveStreamUrlViaYtDlp(String url) throws Exception {
+        ProcessBuilder pb = new ProcessBuilder(
+            getYtdlpPath(),
+            "-g",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            url
+        );
+        pb.redirectErrorStream(true);
+
+        Process process = pb.start();
+
+        String firstUrl = null;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // yt-dlp -g may print video and audio URLs on separate
+                // lines; we want the first http(s) URL only. stderr is
+                // merged via redirectErrorStream so we filter non-URL
+                // lines (errors/warnings) out.
+                String trimmed = line.trim();
+                if (firstUrl == null && (trimmed.startsWith("http://") || trimmed.startsWith("https://"))) {
+                    firstUrl = trimmed;
+                }
+            }
+        }
+
+        boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroyForcibly();
+            throw new Exception("yt-dlp -g timeout");
+        }
+        if (firstUrl == null) {
+            throw new Exception("yt-dlp -g returned no stream URL");
+        }
+        return firstUrl;
     }
 
     private static ProbeResult getDurationViaYtDlp(String url) throws Exception {
