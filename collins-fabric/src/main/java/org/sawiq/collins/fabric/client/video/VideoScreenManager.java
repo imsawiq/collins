@@ -342,12 +342,21 @@ public final class VideoScreenManager {
 
     public static void stopAll() {
         if (DEBUG) System.out.println("[Collins] stopAll()");
+        // Belt-and-suspenders: globally close every audio line that any
+        // VideoPlayer ever opened BEFORE we walk the SCREENS map. Per-screen
+        // stop() also tries to silence audio, but it routes through that
+        // screen's currentAudio reference, which has a narrow race window
+        // around playOnce()'s try-with-resources where currentAudio can be
+        // either null or already-discarded. Closing all lines up-front
+        // makes the user-perceived silence instant and unconditional.
+        VideoAudioPlayer.shutdownAll();
         for (VideoScreen s : SCREENS.values()) s.stop();
         SCREENS.clear();
     }
 
     public static void stopAllPlayback() {
         if (DEBUG) System.out.println("[Collins] stopAllPlayback()");
+        VideoAudioPlayer.shutdownAll();
         for (VideoScreen s : SCREENS.values()) s.stop();
     }
 

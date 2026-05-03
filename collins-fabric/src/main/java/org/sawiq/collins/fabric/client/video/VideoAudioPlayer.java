@@ -3,15 +3,52 @@ package org.sawiq.collins.fabric.client.video;
 import javax.sound.sampled.*;
 import java.nio.Buffer;
 import java.nio.ShortBuffer;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 
 public final class VideoAudioPlayer implements AutoCloseable {
+
+    /**
+     * Every {@link VideoAudioPlayer} that has successfully opened its
+     * native audio line is tracked here so that {@link #shutdownAll()}
+     * can guarantee silence on disconnect even if some {@code VideoPlayer}
+     * lost track of its {@code currentAudio} reference due to a race
+     * between {@code playOnce()} opening a fresh line and {@code stop()}
+     * being called from the network/disconnect thread.
+     */
+    private static final Set<VideoAudioPlayer> ACTIVE = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Closes <b>every</b> audio line that any {@link VideoAudioPlayer}
+     * has open. Idempotent; safe to call from any thread. Used by the
+     * client disconnect/join hooks so users never hear stale audio
+     * after leaving a server.
+     */
+    public static void shutdownAll() {
+        for (VideoAudioPlayer p : ACTIVE) {
+            try {
+                p.shutdownNow();
+            } catch (Exception ignored) {
+            }
+        }
+    }
 
     private final int sampleRate;
     private final int channels;
     private final SourceDataLine line;
 
     private volatile boolean started;
+
+    /**
+     * Set as soon as {@link #shutdownNow()} is called. We check it from
+     * {@link #writeSamples} and {@link #prebufferSamples} as an extra
+     * safety net: even on JDK builds where {@code line.write()} on a
+     * closed {@link SourceDataLine} silently returns 0 (busy-looping the
+     * grab thread instead of throwing), we will refuse to push any more
+     * samples to native code once shutdown has been requested.
+     */
+    private volatile boolean silenced = false;
 
     private volatile float gain = 1.0f;
 
@@ -35,6 +72,8 @@ public final class VideoAudioPlayer implements AutoCloseable {
         this.started = false;
 
         this.prebufferMaxBytes = Math.max(65536, bytesPerSecond * 4);
+
+        ACTIVE.add(this);
     }
 
     public void startPlayback() {
@@ -52,11 +91,18 @@ public final class VideoAudioPlayer implements AutoCloseable {
     }
 
     public void shutdownNow() {
+        // Mark silenced FIRST so any concurrent writeSamples() running on
+        // the playback thread bails out before touching the (now closing)
+        // native line. This is what actually guarantees instant silence:
+        // even if line.stop()/close() were no-ops on this JDK build, our
+        // own write path no longer feeds samples to native code.
+        silenced = true;
         try { line.stop(); } catch (Exception ignored) {}
         try { line.flush(); } catch (Exception ignored) {}
         try { line.close(); } catch (Exception ignored) {}
         started = false;
         prebufferLen = 0;
+        ACTIVE.remove(this);
     }
 
     public boolean hasPrebuffer() {
@@ -64,6 +110,7 @@ public final class VideoAudioPlayer implements AutoCloseable {
     }
 
     public void prebufferSamples(Buffer[] samples, int channelsWanted) {
+        if (silenced) return;
         if (samples == null || samples.length == 0) return;
         if (!(samples[0] instanceof ShortBuffer)) return;
 
@@ -77,6 +124,7 @@ public final class VideoAudioPlayer implements AutoCloseable {
     }
 
     public void flushPrebuffer() {
+        if (silenced) { prebufferLen = 0; return; }
         if (prebufferLen <= 0) return;
         writePcmNonBlocking(prebuffer, prebufferLen);
         prebufferLen = 0;
@@ -91,6 +139,7 @@ public final class VideoAudioPlayer implements AutoCloseable {
     }
 
     public void writeSamples(Buffer[] samples, int channelsWanted) {
+        if (silenced) return;
         if (samples == null || samples.length == 0) return;
 
         // чаще всего JavaCV даёт ShortBuffer
@@ -168,16 +217,29 @@ public final class VideoAudioPlayer implements AutoCloseable {
     private void writePcmNonBlocking(byte[] pcm, int len) {
         int off = 0;
         while (off < len) {
-            if (Thread.interrupted()) return;
+            // Two independent ways out: either we were interrupted, OR
+            // shutdownNow() flipped the silenced flag. The second check
+            // is what saves us when the FFmpeg grab thread is still alive
+            // but the line has already been closed by another thread.
+            if (silenced || Thread.interrupted()) return;
 
-            int avail = line.available();
+            int avail;
+            try {
+                avail = line.available();
+            } catch (Exception ignored) {
+                return;
+            }
             if (avail <= 0) {
                 LockSupport.parkNanos(1_000_000L);
                 continue;
             }
 
             int n = Math.min(avail, len - off);
-            line.write(pcm, off, n);
+            try {
+                line.write(pcm, off, n);
+            } catch (Exception ignored) {
+                return;
+            }
             off += n;
         }
     }
