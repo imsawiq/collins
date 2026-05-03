@@ -1,26 +1,78 @@
 package org.sawiq.collins.paper.util;
 
+import java.io.File;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Locale;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Автозагрузка ffprobe/yt-dlp в plugins/collins-paper/tools/
+ * Автозагрузка ffprobe/yt-dlp в plugins/collins-paper/tools/.
+ *
+ * <p>Cross-platform: detects OS/arch and pulls the correct yt-dlp binary.
+ * On *nix the executable bit is applied after the file lands. On Windows
+ * we additionally extract ffprobe.exe from the BtbN FFmpeg build; on Linux
+ * and macOS we expect ffprobe from the system package manager (apt/brew)
+ * and only fall back to it for VK-style edge cases — yt-dlp -j alone
+ * resolves duration for 95% of URLs.
  */
 public final class ToolsDownloader {
 
-    private static final String YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    private static final String FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    private enum Os { WINDOWS, LINUX, MACOS, UNKNOWN }
+    private enum Arch { X64, ARM64, UNKNOWN }
+
+    private static final Os OS = detectOs();
+    private static final Arch ARCH = detectArch();
+
+    private static final String YTDLP_BASE = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
+    private static final String FFMPEG_WIN_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
     private static Logger logger;
     private static Path toolsDir;
     private static volatile boolean downloading = false;
+
+    private static Os detectOs() {
+        String n = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (n.contains("win")) return Os.WINDOWS;
+        if (n.contains("mac") || n.contains("darwin")) return Os.MACOS;
+        if (n.contains("nux") || n.contains("nix") || n.contains("aix")) return Os.LINUX;
+        return Os.UNKNOWN;
+    }
+
+    private static Arch detectArch() {
+        String a = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        if (a.contains("aarch64") || a.contains("arm64")) return Arch.ARM64;
+        if (a.contains("amd64") || a.contains("x86_64") || a.equals("x64")) return Arch.X64;
+        return Arch.UNKNOWN;
+    }
+
+    private static String ytdlpFileName() {
+        return OS == Os.WINDOWS ? "yt-dlp.exe" : "yt-dlp";
+    }
+
+    /**
+     * Returns the upstream asset name from yt-dlp releases that matches the
+     * current OS/arch. Linux x64 uses the plain {@code yt-dlp} static build
+     * (PyInstaller, no Python required).
+     */
+    private static String ytdlpAssetName() {
+        return switch (OS) {
+            case WINDOWS -> "yt-dlp.exe";
+            case MACOS -> "yt-dlp_macos";
+            case LINUX -> ARCH == Arch.ARM64 ? "yt-dlp_linux_aarch64" : "yt-dlp_linux";
+            default -> "yt-dlp";
+        };
+    }
+
+    private static String ffprobeFileName() {
+        return OS == Os.WINDOWS ? "ffprobe.exe" : "ffprobe";
+    }
 
     public static void init(Logger log, Path pluginDataFolder) {
         logger = log;
@@ -28,7 +80,7 @@ public final class ToolsDownloader {
     }
 
     public static String getYtdlpPath() {
-        Path p = toolsDir.resolve("yt-dlp.exe");
+        Path p = toolsDir.resolve(ytdlpFileName());
         if (Files.isRegularFile(p)) {
             return p.toAbsolutePath().toString();
         }
@@ -36,7 +88,7 @@ public final class ToolsDownloader {
     }
 
     public static String getFfprobePath() {
-        Path p = toolsDir.resolve("ffprobe.exe");
+        Path p = toolsDir.resolve(ffprobeFileName());
         if (Files.isRegularFile(p)) {
             return p.toAbsolutePath().toString();
         }
@@ -66,20 +118,49 @@ public final class ToolsDownloader {
             return;
         }
 
-        Path ytdlp = toolsDir.resolve("yt-dlp.exe");
+        log("Detected platform: " + OS + "/" + ARCH);
+
+        Path ytdlp = toolsDir.resolve(ytdlpFileName());
         if (!Files.isRegularFile(ytdlp)) {
-            log("yt-dlp not found, downloading...");
-            downloadFile(YTDLP_URL, ytdlp);
+            String asset = ytdlpAssetName();
+            log("yt-dlp not found, downloading " + asset + " ...");
+            if (downloadFile(YTDLP_BASE + asset, ytdlp)) {
+                makeExecutable(ytdlp);
+            }
         } else {
+            // Pre-existing binary may have been copied without +x bit
+            // (common when extracting plugin archives on Linux as root).
+            makeExecutable(ytdlp);
             log("yt-dlp found: " + ytdlp);
         }
 
-        Path ffprobe = toolsDir.resolve("ffprobe.exe");
+        Path ffprobe = toolsDir.resolve(ffprobeFileName());
         if (!Files.isRegularFile(ffprobe)) {
-            log("ffprobe not found, downloading FFmpeg...");
-            downloadFfmpeg(ffprobe);
+            if (OS == Os.WINDOWS) {
+                log("ffprobe not found, downloading FFmpeg...");
+                downloadFfmpeg(ffprobe);
+            } else {
+                log("ffprobe not bundled on " + OS + "; install via system package manager if VK probing is needed (apt install ffmpeg / brew install ffmpeg). yt-dlp -j alone handles YouTube/RuTube duration probing.");
+            }
         } else {
+            makeExecutable(ffprobe);
             log("ffprobe found: " + ffprobe);
+        }
+    }
+
+    private static void makeExecutable(Path p) {
+        if (OS == Os.WINDOWS) return;
+        try {
+            File f = p.toFile();
+            // Set +x for owner, group and others so server processes running
+            // under different users (root vs. dedicated 'minecraft' user) can
+            // execute the freshly downloaded binary without manual chmod.
+            if (!f.canExecute()) {
+                boolean ok = f.setExecutable(true, false);
+                if (!ok) log("Failed to set +x on " + p);
+            }
+        } catch (Exception e) {
+            log("setExecutable failed for " + p + ": " + e.getMessage());
         }
     }
 
@@ -141,7 +222,7 @@ public final class ToolsDownloader {
             Path zipTmp = toolsDir.resolve("ffmpeg.zip.tmp");
             Files.deleteIfExists(zipTmp);
 
-            URL url = new URL(FFMPEG_URL);
+            URL url = new URL(FFMPEG_WIN_URL);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setInstanceFollowRedirects(true);
             conn.setConnectTimeout(30_000);
@@ -200,6 +281,11 @@ public final class ToolsDownloader {
                     zis.closeEntry();
                 }
             }
+
+            // Windows .exe archives don't need +x but call it anyway in case
+            // the plugin is ever run under WSL or a Linux-flavoured JVM that
+            // mounts the path differently.
+            if (extracted) makeExecutable(ffprobeTarget);
 
             Files.deleteIfExists(zipTmp);
 
