@@ -22,18 +22,15 @@ import java.util.function.Function;
 
 /**
  * Renders in-world video screens as quads at the end of the world render
- * pass. To support Minecraft 1.21.9 through 1.21.11 with a single jar we
- * resolve the Fabric API entry points via reflection at init time:
- * <ul>
- *   <li>1.21.10+ exposes {@code net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents}
- *       with an {@code END_MAIN} phase and a context whose matrices/camera are
- *       accessed via {@code matrices()} and {@code worldState().cameraRenderState.pos}.</li>
- *   <li>1.21.9 still ships the legacy {@code net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents}
- *       with a {@code LAST} phase and a context exposing {@code matrixStack()} and {@code camera().getPos()}.</li>
- * </ul>
- * The render geometry itself uses only vanilla MC classes (MatrixStack,
- * VertexConsumerProvider, RenderLayer, etc.) whose intermediary names are
- * stable across the 1.21.x series.
+ * pass. Targets 1.21.10+ where Fabric API exposes the redesigned
+ * {@code net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents}
+ * with an {@code END_MAIN} phase. (Fabric API removed the legacy
+ * {@code WorldRenderEvents} when porting to 1.21.9 and a replacement was
+ * only shipped in 1.21.10, so the mod's {@code fabric.mod.json} pins MC
+ * to {@code >=1.21.10}.) Bindings are resolved via reflection so a future
+ * minor signature shift does not break compilation, and the per-frame
+ * dispatch is wrapped in try/catch so a vanilla rendering API change can
+ * never crash the world renderer.
  */
 public final class VideoScreenRenderer {
 
@@ -45,66 +42,20 @@ public final class VideoScreenRenderer {
     private static Function<Object, Vec3d> CTX_CAM_POS;
     private static Function<Identifier, RenderLayer> RENDER_LAYER_LOOKUP;
     private static volatile boolean renderLayerWarned = false;
-    private static int dispatchCount = 0;
-    private static int nullLayerLogCount = 0;
 
     private VideoScreenRenderer() {}
 
     public static void init() {
-        logEnvironment();
-
-        String[] candidates = {
-            // 1.21.10+
-            "net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents",
-            // 1.21.9 and earlier
-            "net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents",
-        };
-
-        for (String fqn : candidates) {
-            Class<?> cls;
-            try {
-                cls = Class.forName(fqn);
-            } catch (ClassNotFoundException e) {
-                log("probe " + fqn + " -> NOT PRESENT");
-                continue;
-            } catch (Throwable t) {
-                warn("probe " + fqn + " threw " + t.getClass().getSimpleName(), t);
-                continue;
-            }
-            log("probe " + fqn + " -> FOUND");
-            boolean modern = fqn.contains(".world.");
-            try {
-                if (modern) {
-                    setupModernApi(cls);
-                    log("bound modern WorldRenderEvents (1.21.10+)");
-                } else {
-                    setupLegacyApi(cls);
-                    log("bound legacy WorldRenderEvents (1.21.9-)");
-                }
-                return;
-            } catch (Throwable t) {
-                warn((modern ? "modern" : "legacy") + " WorldRenderEvents bind failed", t);
-            }
-        }
-        System.err.println("[Collins] No compatible WorldRenderEvents API found; video screens will not render.");
-    }
-
-    private static void logEnvironment() {
+        // The mod requires 1.21.10+ (fabric.mod.json minimum); on those
+        // versions Fabric API exposes the redesigned WorldRenderEvents in
+        // the .world. subpackage. We bind via reflection so a future minor
+        // signature shift does not break compilation.
         try {
-            FabricLoader fl = FabricLoader.getInstance();
-            log("env: development=" + fl.isDevelopmentEnvironment());
-            for (String id : new String[]{ "fabric-rendering-v1", "fabric-api", "fabricloader", "minecraft" }) {
-                fl.getModContainer(id).ifPresent(c ->
-                    log("env: " + id + "=" + c.getMetadata().getVersion().getFriendlyString())
-                );
-            }
+            Class<?> events = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents");
+            setupModernApi(events);
         } catch (Throwable t) {
-            warn("logEnvironment failed", t);
+            warn("WorldRenderEvents bind failed; video screens will not render", t);
         }
-    }
-
-    private static void log(String msg) {
-        System.out.println("[Collins] VideoScreenRenderer: " + msg);
     }
 
     // ----- API bindings ----------------------------------------------------
@@ -142,39 +93,6 @@ public final class VideoScreenRenderer {
         registerListener(event, listenerIface);
     }
 
-    private static void setupLegacyApi(Class<?> eventsClass) throws Exception {
-        Class<?> ctxClass = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext");
-        Method matrixStackM = ctxClass.getMethod("matrixStack");
-        Method cameraM = ctxClass.getMethod("camera");
-        // Camera.getPos() returns Vec3d on every 1.21.x. We look it up by
-        // reflection so that yarn-level method renames (which do not affect
-        // intermediary names) don't matter in production.
-        Class<?> cameraClass = cameraM.getReturnType();
-        Method getPosM = findVec3dGetter(cameraClass);
-
-        CTX_MATRICES = ctx -> {
-            try {
-                return (MatrixStack) matrixStackM.invoke(ctx);
-            } catch (Exception e) {
-                return null;
-            }
-        };
-        CTX_CAM_POS = ctx -> {
-            try {
-                Object cam = cameraM.invoke(ctx);
-                if (cam == null || getPosM == null) return null;
-                return (Vec3d) getPosM.invoke(cam);
-            } catch (Exception e) {
-                return null;
-            }
-        };
-        RENDER_LAYER_LOOKUP = resolveRenderLayerLookup();
-
-        Class<?> listenerIface = Class.forName("net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents$Last");
-        Object event = eventsClass.getField("LAST").get(null);
-        registerListener(event, listenerIface);
-    }
-
     private static void registerListener(Object event, Class<?> listenerIface) throws Exception {
         // Use the listener interface's own classloader so Proxy can see it
         // even if Fabric API ships in a separate module classloader.
@@ -204,18 +122,6 @@ public final class VideoScreenRenderer {
         register.invoke(event, proxy);
     }
 
-    private static Method findVec3dGetter(Class<?> cameraClass) {
-        // Camera.getPos() on every 1.21.x maps to the same intermediary
-        // method and returns Vec3d. We grab the first zero-arg public method
-        // that returns Vec3d to avoid committing to a yarn-specific name.
-        for (Method m : cameraClass.getMethods()) {
-            if (m.getParameterCount() == 0 && m.getReturnType() == Vec3d.class) {
-                return m;
-            }
-        }
-        return null;
-    }
-
     private static Function<Identifier, RenderLayer> resolveRenderLayerLookup() {
         // The vanilla method that produces our entity-cutout layer was both
         // moved (RenderLayer -> RenderLayers) and renumbered between 1.21.9
@@ -230,19 +136,17 @@ public final class VideoScreenRenderer {
         Function<Identifier, RenderLayer> modern = tryStaticByIntermediary(
             mr, "net.minecraft.class_12249", "method_75996", idDesc);
         if (modern != null) {
-            log("render layer: bound RenderLayers.entityCutoutNoCullZOffset (modern)");
             return modern;
         }
 
-        // 1.21.9 and earlier: net.minecraft.client.render.RenderLayer#getEntityCutoutNoCullZOffset
+        // 1.21.9 and earlier: net.minecraft.client.render.RenderLayer#getEntityCutoutNoCullZOffset.
+        // Kept as a defensive fallback; the mod is pinned to 1.21.10+ in
+        // fabric.mod.json so this path normally never runs.
         Function<Identifier, RenderLayer> legacy = tryStaticByIntermediary(
             mr, "net.minecraft.class_1921", "method_28116", idDesc);
         if (legacy != null) {
-            log("render layer: bound RenderLayer.getEntityCutoutNoCullZOffset (legacy)");
             return legacy;
         }
-
-        warn("render layer: no compatible vanilla method found", null);
         return id -> null;
     }
 
@@ -276,10 +180,6 @@ public final class VideoScreenRenderer {
     // ----- Render hook -----------------------------------------------------
 
     private static void dispatch(Object ctx) {
-        if (dispatchCount < 3) {
-            dispatchCount++;
-            log("dispatch fired #" + dispatchCount + " ctx=" + (ctx == null ? "null" : ctx.getClass().getName()));
-        }
         try {
             onRender(ctx);
         } catch (Throwable t) {
@@ -322,13 +222,7 @@ public final class VideoScreenRenderer {
             screen.renderPlayback();
             if (!screen.hasTexture()) continue;
             RenderLayer layer = rlGet.apply(screen.textureId());
-            if (layer == null) {
-                if (nullLayerLogCount < 3) {
-                    nullLayerLogCount++;
-                    log("render layer is null for textureId=" + screen.textureId() + " (screen will be skipped)");
-                }
-                continue;
-            }
+            if (layer == null) continue;
             drawScreen(entry, consumers, cam, st, layer);
         }
 
@@ -450,14 +344,6 @@ public final class VideoScreenRenderer {
 
         int color = 0xFFFFFFFF;
         vc.vertex(p.x, p.y, p.z, color, u, v, overlay, light, n.x, n.y, n.z);
-    }
-
-    private static Class<?> forNameOrNull(String name) {
-        try {
-            return Class.forName(name);
-        } catch (ClassNotFoundException e) {
-            return null;
-        }
     }
 
     private static void warn(String context, Throwable t) {
