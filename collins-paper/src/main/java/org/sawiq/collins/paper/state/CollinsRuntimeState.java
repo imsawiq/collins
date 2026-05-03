@@ -25,6 +25,17 @@ public final class CollinsRuntimeState {
         stopPlayback(screenName, false);
     }
 
+    /**
+     * Drops the playback bookkeeping for a deleted screen so the
+     * internal map doesn't accumulate one entry per screen name that
+     * has ever existed during the server's lifetime. Called from
+     * {@code /collins remove}.
+     */
+    public void remove(String screenName) {
+        if (screenName == null) return;
+        playback.remove(screenName.toLowerCase());
+    }
+
     public void stopPlayback(String screenName) {
         stopPlayback(screenName, true);
     }

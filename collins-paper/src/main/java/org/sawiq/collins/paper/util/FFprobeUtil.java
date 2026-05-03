@@ -2,6 +2,7 @@ package org.sawiq.collins.paper.util;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -74,6 +75,14 @@ public class FFprobeUtil {
     }
 
     public static CompletableFuture<Long> getDurationMs(String url) {
+        if (!isProbeSafeUrl(url)) {
+            // Refuse to launch yt-dlp/ffprobe on URLs that aren't plain
+            // http(s)/rtmp(s)/rtsp. file://, gopher://, /etc/passwd or
+            // values that start with '-' (which would be parsed as a CLI
+            // flag) must never reach the subprocess - they are an SSRF /
+            // local-file-disclosure / arg-injection vector.
+            return CompletableFuture.completedFuture(0L);
+        }
         CachedDuration cached = getCached(url);
         if (cached != null) {
             return CompletableFuture.completedFuture(cached.durationMs());
@@ -104,6 +113,29 @@ public class FFprobeUtil {
                 return 0L;
             }
         });
+    }
+
+    /**
+     * Whitelist URL schemes for any URL that will be passed to a
+     * subprocess (yt-dlp / ffprobe). Rejects:
+     * <ul>
+     *   <li>{@code null} / blank</li>
+     *   <li>values starting with {@code -} (would be treated as a flag)</li>
+     *   <li>schemes other than http/https/rtmp/rtmps/rtsp</li>
+     * </ul>
+     * In particular this blocks {@code file://}, {@code gopher://}, raw
+     * filesystem paths, and other schemes that ffmpeg/ffprobe natively
+     * understand and that could exfiltrate local files or do SSRF.
+     */
+    static boolean isProbeSafeUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        if (url.charAt(0) == '-') return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://")
+            || lower.startsWith("https://")
+            || lower.startsWith("rtmp://")
+            || lower.startsWith("rtmps://")
+            || lower.startsWith("rtsp://");
     }
 
     private static boolean isFailureCached(String url) {
@@ -194,6 +226,10 @@ public class FFprobeUtil {
             "--no-playlist",
             "--no-warnings",
             "--quiet",
+            "--",  // end-of-options sentinel: defends against URLs that
+                   // happen to start with '-' even after isProbeSafeUrl,
+                   // e.g. a future scheme we add to the whitelist that
+                   // contains a leading dash in its hostname.
             url
         );
         pb.redirectErrorStream(true);
@@ -234,6 +270,7 @@ public class FFprobeUtil {
             "--no-download",
             "--no-warnings",
             "--quiet",
+            "--",
             url
         );
         pb.redirectErrorStream(true);

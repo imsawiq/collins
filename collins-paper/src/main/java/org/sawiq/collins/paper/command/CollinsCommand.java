@@ -581,6 +581,7 @@ public final class CollinsCommand implements TabExecutor {
 
                 store.save();
                 runtime.resetPlayback(removed.name());
+                runtime.remove(removed.name());
                 Playlist.remove(removed.name());
                 playlistStore.save();
                 plugin.forgetDurationRequestState(removed.name());
