@@ -11,7 +11,7 @@
     "issues": "https://github.com/imsawiq/collins/issues",
     "discord": "https://discord.gg/jsH9bGj2NU"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "environment": "*",
   "entrypoints": {
     "main": ["org.sawiq.collins.fabric.CollinsFabricMod"],
