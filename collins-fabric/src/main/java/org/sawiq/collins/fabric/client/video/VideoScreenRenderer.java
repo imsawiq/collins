@@ -19,7 +19,7 @@ import org.sawiq.collins.fabric.client.state.ScreenState;
  * Renders in-world video screens as quads at the end of the world render
  * pass. Targets 1.21.10+ where Fabric API exposes the redesigned
  * {@code net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents}
- * with an {@code END_MAIN} phase. (Fabric API removed the legacy
+ * with the redesigned world render phases. (Fabric API removed the legacy
  * {@code WorldRenderEvents} when porting to 1.21.9 and a replacement was
  * only shipped in 1.21.10, so the mod's {@code fabric.mod.json} pins MC
  * to {@code >=1.21.10}.) The per-frame dispatch is wrapped in try/catch so
@@ -34,7 +34,7 @@ public final class VideoScreenRenderer {
     private VideoScreenRenderer() {}
 
     public static void init() {
-        WorldRenderEvents.END_MAIN.register(VideoScreenRenderer::dispatch);
+        WorldRenderEvents.BEFORE_ENTITIES.register(VideoScreenRenderer::dispatch);
     }
 
     // ----- Render hook -----------------------------------------------------
@@ -59,7 +59,8 @@ public final class VideoScreenRenderer {
         if (matrices == null || cam == null) return;
 
         MinecraftClient client = MinecraftClient.getInstance();
-        VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
+        VertexConsumerProvider consumers = ctx.consumers();
+        if (consumers == null) return;
 
         matrices.push();
         matrices.translate(-cam.x, -cam.y, -cam.z);
@@ -67,7 +68,6 @@ public final class VideoScreenRenderer {
 
         if (!CollinsClientConfig.get().renderVideo) {
             matrices.pop();
-            consumers.draw();
             return;
         }
 
@@ -81,7 +81,6 @@ public final class VideoScreenRenderer {
         }
 
         matrices.pop();
-        consumers.draw();
     }
 
     private static void drawScreen(MatrixStack.Entry entry,
