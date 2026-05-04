@@ -27,3 +27,18 @@ tasks.register('collectJars', Copy) {
 tasks.named('assemble') {
     dependsOn 'collectJars'
 }
+
+// Also kick off collectJars whenever the user invokes a subproject's
+// jar-producing task directly (e.g. `gradlew :collins-fabric:build`).
+// Without this, calling the subproject task bypasses the root
+// `assemble` lifecycle entirely and the root build/libs/ stays empty.
+project(':collins-fabric').afterEvaluate {
+    project(':collins-fabric').tasks.named('remapJar') {
+        finalizedBy ':collectJars'
+    }
+}
+project(':collins-paper').afterEvaluate {
+    project(':collins-paper').tasks.named('jar') {
+        finalizedBy ':collectJars'
+    }
+}
