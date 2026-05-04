@@ -6,7 +6,6 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
 import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.math.MatrixStack;
@@ -63,24 +62,30 @@ public final class VideoScreenRenderer {
         if (consumers == null) return;
 
         matrices.push();
-        matrices.translate(-cam.x, -cam.y, -cam.z);
-        MatrixStack.Entry entry = matrices.peek();
+        try {
+            matrices.translate(-cam.x, -cam.y, -cam.z);
+            MatrixStack.Entry entry = matrices.peek();
 
-        if (!CollinsClientConfig.get().renderVideo) {
+            if (!CollinsClientConfig.get().renderVideo) return;
+
+            for (VideoScreen screen : VideoScreenManager.all()) {
+                ScreenState st = screen.state();
+                if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
+                screen.renderPlayback();
+                if (!screen.hasTexture()) continue;
+                // RenderLayer.getEntityCutoutNoCullZOffset exists in 1.21.10
+                // Yarn (intermediary class_1921.method_28116). The same
+                // intermediary id carries through to 1.21.11 even though Yarn
+                // moved the method to RenderLayers there, so a 1.21.10-built
+                // jar works on both versions.
+                RenderLayer layer = RenderLayer.getEntityCutoutNoCullZOffset(screen.textureId());
+                drawScreen(entry, consumers, cam, st, layer);
+            }
+        } finally {
+            // Always balance push() to keep vanilla's pose stack empty,
+            // otherwise MC throws "Pose stack not empty" the same frame.
             matrices.pop();
-            return;
         }
-
-        for (VideoScreen screen : VideoScreenManager.all()) {
-            ScreenState st = screen.state();
-            if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
-            screen.renderPlayback();
-            if (!screen.hasTexture()) continue;
-            RenderLayer layer = RenderLayers.entityCutoutNoCullZOffset(screen.textureId());
-            drawScreen(entry, consumers, cam, st, layer);
-        }
-
-        matrices.pop();
     }
 
     private static void drawScreen(MatrixStack.Entry entry,
