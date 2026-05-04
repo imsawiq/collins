@@ -1,5 +1,29 @@
+plugins {
+    id 'base'
+}
+
 allprojects {
     repositories {
         mavenCentral()
     }
+}
+
+// Mirror the final shippable jars from each subproject into a single
+// top-level build/libs/ folder so they can be grabbed without digging
+// into collins-fabric/build/libs/ and collins-paper/build/libs/.
+// Fabric: take the `remapJar` output (the production jar that vanilla
+// Minecraft can load), not the plain `jar` which is the dev-mapped
+// intermediate. Paper: the regular `jar` is the shippable artifact.
+tasks.register('collectJars', Copy) {
+    group = 'build'
+    description = 'Copies the fabric and paper jars into <root>/build/libs'
+
+    from(project(':collins-fabric').tasks.named('remapJar'))
+    from(project(':collins-paper').tasks.named('jar'))
+    into layout.buildDirectory.dir('libs')
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
+tasks.named('assemble') {
+    dependsOn 'collectJars'
 }
