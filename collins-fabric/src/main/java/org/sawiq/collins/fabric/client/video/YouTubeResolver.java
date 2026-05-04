@@ -162,9 +162,92 @@ public final class YouTubeResolver {
             });
     private static final long URL_CACHE_TTL_MS = 5L * 60L * 60L * 1000L;
     private static final long YTDLP_REFRESH_COOLDOWN_MS = 10L * 60L * 1000L;
-    private static final String YTDLP_DOWNLOAD_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    private static final String FFMPEG_DOWNLOAD_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
     private static final Object TOOL_LOCK = new Object();
+
+    // ----- Cross-platform tool resolution --------------------------------
+    // Resolved at class-init from os.name / os.arch so we pick the right
+    // yt-dlp / ffmpeg binary on Windows, Linux (x64 + arm64) and macOS.
+    // Without this every Linux server crashed with `error=13, Permission
+    // denied` because we shipped only `yt-dlp.exe` and never set the
+    // executable bit even when the user supplied a Linux binary manually.
+    private enum Os { WINDOWS, LINUX, MACOS, OTHER }
+    private enum Arch { X64, ARM64, OTHER }
+
+    private static final Os HOST_OS = detectOs();
+    private static final Arch HOST_ARCH = detectArch();
+    private static final boolean POSIX = HOST_OS == Os.LINUX || HOST_OS == Os.MACOS;
+
+    private static Os detectOs() {
+        String name = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (name.contains("win")) return Os.WINDOWS;
+        if (name.contains("mac") || name.contains("darwin")) return Os.MACOS;
+        if (name.contains("nix") || name.contains("nux") || name.contains("aix")) return Os.LINUX;
+        return Os.OTHER;
+    }
+
+    private static Arch detectArch() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        if (arch.contains("aarch64") || arch.contains("arm64")) return Arch.ARM64;
+        if (arch.contains("amd64") || arch.contains("x86_64") || arch.contains("x64")) return Arch.X64;
+        return Arch.OTHER;
+    }
+
+    private static String ytdlpBinaryName() {
+        return HOST_OS == Os.WINDOWS ? "yt-dlp.exe" : "yt-dlp";
+    }
+
+    private static String ffmpegBinaryName() {
+        return HOST_OS == Os.WINDOWS ? "ffmpeg.exe" : "ffmpeg";
+    }
+
+    private static String ytdlpDownloadUrl() {
+        String base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
+        return switch (HOST_OS) {
+            case WINDOWS -> base + "yt-dlp.exe";
+            case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "yt-dlp_linux_aarch64" : "yt-dlp_linux");
+            case MACOS -> base + "yt-dlp_macos";
+            case OTHER -> null;
+        };
+    }
+
+    /**
+     * BtbN ships builds for Windows, Linux x64, Linux arm64 and macOS x64.
+     * On Apple Silicon we return null so the user is told to install ffmpeg
+     * manually instead of pulling a Rosetta-only x64 build.
+     */
+    private static String ffmpegDownloadUrl() {
+        String base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-";
+        return switch (HOST_OS) {
+            case WINDOWS -> base + "win64-gpl.zip";
+            case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "linuxarm64-gpl.tar.xz" : "linux64-gpl.tar.xz");
+            case MACOS -> HOST_ARCH == Arch.ARM64 ? null : base + "osx64-gpl.tar.xz";
+            case OTHER -> null;
+        };
+    }
+
+    /**
+     * Mark {@code path} as executable on POSIX systems. Without this the
+     * downloaded yt-dlp / ffmpeg binary is created with the JVM's default
+     * 644 permissions and {@link ProcessBuilder#start()} fails with
+     * {@code IOException: Cannot run program ...: error=13, Permission
+     * denied}.
+     */
+    private static void ensureExecutable(Path path) {
+        if (!POSIX || path == null) return;
+        try {
+            java.util.Set<java.nio.file.attribute.PosixFilePermission> perms = java.util.EnumSet.of(
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE,
+                java.nio.file.attribute.PosixFilePermission.GROUP_READ,
+                java.nio.file.attribute.PosixFilePermission.GROUP_EXECUTE,
+                java.nio.file.attribute.PosixFilePermission.OTHERS_READ,
+                java.nio.file.attribute.PosixFilePermission.OTHERS_EXECUTE);
+            Files.setPosixFilePermissions(path, perms);
+        } catch (Exception e) {
+            try { path.toFile().setExecutable(true, false); } catch (Exception ignored) {}
+        }
+    }
 
     private static volatile boolean ytdlpAvailable = false;
     private static volatile boolean ytdlpChecked = false;
@@ -613,9 +696,15 @@ public final class YouTubeResolver {
             ytdlpDownloadProgress = 0;
 
             try {
+                String url = ytdlpDownloadUrl();
+                if (url == null) {
+                    dbg("ensureYtdlpAvailable: no yt-dlp build for " + HOST_OS + "/" + HOST_ARCH);
+                    return false;
+                }
                 Files.createDirectories(getToolsDir());
-                downloadFile(YTDLP_DOWNLOAD_URL, ytdlp, true);
+                downloadFile(url, ytdlp, true);
                 ytdlpAvailable = Files.isRegularFile(ytdlp);
+                if (ytdlpAvailable) ensureExecutable(ytdlp);
                 ytdlpChecked = true;
                 return ytdlpAvailable;
             } catch (Exception e) {
@@ -641,10 +730,17 @@ public final class YouTubeResolver {
             lastYtdlpRefreshAttemptMs = now;
 
             try {
+                String url = ytdlpDownloadUrl();
+                if (url == null) {
+                    dbg("tryRefreshYtdlpBinary: no yt-dlp build for " + HOST_OS + "/" + HOST_ARCH);
+                    return false;
+                }
                 dbg("tryRefreshYtdlpBinary: refreshing yt-dlp after resolution failure");
                 Files.createDirectories(getToolsDir());
-                downloadFile(YTDLP_DOWNLOAD_URL, getYtdlpPath(), false);
-                ytdlpAvailable = Files.isRegularFile(getYtdlpPath());
+                downloadFile(url, getYtdlpPath(), false);
+                Path bin = getYtdlpPath();
+                ytdlpAvailable = Files.isRegularFile(bin);
+                if (ytdlpAvailable) ensureExecutable(bin);
                 ytdlpChecked = ytdlpAvailable;
                 dbg("tryRefreshYtdlpBinary: refreshed=" + ytdlpAvailable);
                 return ytdlpAvailable;
@@ -667,23 +763,23 @@ public final class YouTubeResolver {
             }
 
             try {
-                Files.createDirectories(getToolsDir());
-                Path zipTmp = getToolsDir().resolve("ffmpeg.zip.tmp");
-                downloadFile(FFMPEG_DOWNLOAD_URL, zipTmp, false);
-
-                try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipTmp))) {
-                    ZipEntry entry;
-                    while ((entry = zis.getNextEntry()) != null) {
-                        String name = entry.getName();
-                        if (!entry.isDirectory() && name.endsWith("ffmpeg.exe")) {
-                            Files.copy(zis, ffmpeg, StandardCopyOption.REPLACE_EXISTING);
-                            ffmpegAvailable = true;
-                        }
-                        zis.closeEntry();
-                    }
+                String url = ffmpegDownloadUrl();
+                if (url == null) {
+                    dbg("ensureFfmpegAvailable: no ffmpeg build for " + HOST_OS + "/" + HOST_ARCH
+                        + "; install ffmpeg manually and put it on PATH");
+                    return false;
                 }
+                Files.createDirectories(getToolsDir());
+                boolean isZip = url.endsWith(".zip");
+                Path archiveTmp = getToolsDir().resolve(isZip ? "ffmpeg.zip.tmp" : "ffmpeg.tar.xz.tmp");
+                downloadFile(url, archiveTmp, false);
 
-                Files.deleteIfExists(zipTmp);
+                ffmpegAvailable = isZip
+                    ? extractFfmpegFromZip(archiveTmp, ffmpeg)
+                    : extractFfmpegFromTarXz(archiveTmp, ffmpeg);
+
+                Files.deleteIfExists(archiveTmp);
+                if (ffmpegAvailable) ensureExecutable(ffmpeg);
                 ffmpegChecked = true;
                 return ffmpegAvailable;
             } catch (Exception e) {
@@ -1644,18 +1740,85 @@ public final class YouTubeResolver {
     }
 
     private static Path getYtdlpPath() {
+        String name = ytdlpBinaryName();
         try {
-            return getToolsDir().resolve("yt-dlp.exe");
+            return getToolsDir().resolve(name);
         } catch (Exception e) {
-            return Path.of("collins-tools", "yt-dlp.exe");
+            return Path.of("collins-tools", name);
         }
     }
 
     private static Path getFfmpegPath() {
+        String name = ffmpegBinaryName();
         try {
-            return getToolsDir().resolve("ffmpeg.exe");
+            return getToolsDir().resolve(name);
         } catch (Exception e) {
-            return Path.of("collins-tools", "ffmpeg.exe");
+            return Path.of("collins-tools", name);
+        }
+    }
+
+    private static boolean extractFfmpegFromZip(Path zipFile, Path ffmpegTarget) throws Exception {
+        String wanted = ffmpegBinaryName();
+        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (entry.isDirectory()) { zis.closeEntry(); continue; }
+                if (name.endsWith("/" + wanted) || name.endsWith("\\" + wanted) || name.equals(wanted)) {
+                    Files.copy(zis, ffmpegTarget, StandardCopyOption.REPLACE_EXISTING);
+                    return true;
+                }
+                zis.closeEntry();
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Extract {@code ffmpeg} from a {@code .tar.xz} archive by shelling
+     * out to the system {@code tar}. Every Linux / macOS host has a
+     * {@code tar} that understands {@code -J} (xz), so this avoids
+     * pulling in Apache Commons Compress just for the bootstrap path.
+     */
+    private static boolean extractFfmpegFromTarXz(Path archive, Path ffmpegTarget) {
+        Path stage = null;
+        try {
+            stage = Files.createTempDirectory(getToolsDir(), "ffmpeg-stage-");
+            ProcessBuilder pb = new ProcessBuilder("tar", "-xJf", archive.toAbsolutePath().toString(),
+                "-C", stage.toAbsolutePath().toString());
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            try (var in = p.getInputStream()) {
+                byte[] buf = new byte[8 * 1024];
+                while (in.read(buf) >= 0) { /* drain */ }
+            }
+            int rc = p.waitFor();
+            if (rc != 0) {
+                dbg("tar exited with code " + rc);
+                return false;
+            }
+            String wanted = ffmpegBinaryName();
+            Path[] found = new Path[] { null };
+            try (var stream = Files.walk(stage)) {
+                stream.filter(Files::isRegularFile).forEach(path -> {
+                    if (found[0] == null && path.getFileName().toString().equals(wanted)) {
+                        found[0] = path;
+                    }
+                });
+            }
+            if (found[0] == null) return false;
+            Files.copy(found[0], ffmpegTarget, StandardCopyOption.REPLACE_EXISTING);
+            return true;
+        } catch (Exception e) {
+            dbg("tar extract error: " + e.getMessage());
+            return false;
+        } finally {
+            if (stage != null) {
+                try (var stream = Files.walk(stage)) {
+                    stream.sorted((a, b) -> b.getNameCount() - a.getNameCount())
+                        .forEach(p -> { try { Files.deleteIfExists(p); } catch (Exception ignored) {} });
+                } catch (Exception ignored) {}
+            }
         }
     }
 

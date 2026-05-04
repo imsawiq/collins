@@ -1,22 +1,38 @@
 package org.sawiq.collins.paper.util;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.EnumSet;
+import java.util.Locale;
+import java.util.Set;
 import java.util.logging.Logger;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * Автозагрузка ffprobe/yt-dlp в plugins/collins-paper/tools/
+ * Cross-platform downloader for the {@code yt-dlp} / {@code ffprobe}
+ * sidecars Collins relies on. Resolves the correct binary name and
+ * download URL for the host OS / arch, drops the result into the
+ * {@code tools/} directory, and on POSIX systems sets the executable
+ * bit so {@link ProcessBuilder} won't fail with {@code error=13
+ * Permission denied}.
  */
 public final class ToolsDownloader {
 
-    private static final String YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    private static final String FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    private enum Os { WINDOWS, LINUX, MACOS, OTHER }
+
+    private enum Arch { X64, ARM64, OTHER }
+
+    private static final Os HOST_OS = detectOs();
+    private static final Arch HOST_ARCH = detectArch();
+    private static final boolean POSIX = HOST_OS == Os.LINUX || HOST_OS == Os.MACOS;
 
     private static Logger logger;
     private static Path toolsDir;
@@ -28,16 +44,18 @@ public final class ToolsDownloader {
     }
 
     public static String getYtdlpPath() {
-        Path p = toolsDir.resolve("yt-dlp.exe");
+        Path p = toolsDir.resolve(ytdlpBinaryName());
         if (Files.isRegularFile(p)) {
+            ensureExecutable(p);
             return p.toAbsolutePath().toString();
         }
         return "yt-dlp";
     }
 
     public static String getFfprobePath() {
-        Path p = toolsDir.resolve("ffprobe.exe");
+        Path p = toolsDir.resolve(ffprobeBinaryName());
         if (Files.isRegularFile(p)) {
+            ensureExecutable(p);
             return p.toAbsolutePath().toString();
         }
         return "ffprobe";
@@ -66,20 +84,36 @@ public final class ToolsDownloader {
             return;
         }
 
-        Path ytdlp = toolsDir.resolve("yt-dlp.exe");
-        if (!Files.isRegularFile(ytdlp)) {
-            log("yt-dlp not found, downloading...");
-            downloadFile(YTDLP_URL, ytdlp);
-        } else {
-            log("yt-dlp found: " + ytdlp);
+        if (HOST_OS == Os.OTHER) {
+            log("Unsupported OS for auto-download (" + System.getProperty("os.name")
+                + "). Place yt-dlp and ffprobe on PATH manually.");
+            return;
         }
 
-        Path ffprobe = toolsDir.resolve("ffprobe.exe");
+        Path ytdlp = toolsDir.resolve(ytdlpBinaryName());
+        if (!Files.isRegularFile(ytdlp)) {
+            String url = ytdlpUrl();
+            if (url == null) {
+                log("No yt-dlp build available for " + HOST_OS + "/" + HOST_ARCH
+                    + "; install yt-dlp manually and put it on PATH.");
+            } else {
+                log("yt-dlp not found, downloading for " + HOST_OS + "/" + HOST_ARCH + "...");
+                if (downloadFile(url, ytdlp)) {
+                    ensureExecutable(ytdlp);
+                }
+            }
+        } else {
+            log("yt-dlp found: " + ytdlp);
+            ensureExecutable(ytdlp);
+        }
+
+        Path ffprobe = toolsDir.resolve(ffprobeBinaryName());
         if (!Files.isRegularFile(ffprobe)) {
             log("ffprobe not found, downloading FFmpeg...");
             downloadFfmpeg(ffprobe);
         } else {
             log("ffprobe found: " + ffprobe);
+            ensureExecutable(ffprobe);
         }
     }
 
@@ -107,7 +141,7 @@ public final class ToolsDownloader {
 
             try (InputStream in = conn.getInputStream();
                  var out = Files.newOutputStream(tmp)) {
-                
+
                 byte[] buf = new byte[64 * 1024];
                 long written = 0;
                 int r;
@@ -137,15 +171,25 @@ public final class ToolsDownloader {
     }
 
     private static boolean downloadFfmpeg(Path ffprobeTarget) {
-        try {
-            Path zipTmp = toolsDir.resolve("ffmpeg.zip.tmp");
-            Files.deleteIfExists(zipTmp);
+        String archiveUrl = ffmpegArchiveUrl();
+        if (archiveUrl == null) {
+            log("No prebuilt ffmpeg available for " + HOST_OS + "/" + HOST_ARCH
+                + "; install ffmpeg/ffprobe manually and put them on PATH.");
+            return false;
+        }
 
-            URL url = new URL(FFMPEG_URL);
+        boolean isZip = archiveUrl.endsWith(".zip");
+        String suffix = isZip ? ".zip.tmp" : ".tar.xz.tmp";
+        Path archiveTmp = toolsDir.resolve("ffmpeg" + suffix);
+
+        try {
+            Files.deleteIfExists(archiveTmp);
+
+            URL url = new URL(archiveUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setInstanceFollowRedirects(true);
             conn.setConnectTimeout(30_000);
-            conn.setReadTimeout(300_000); // 5 минут для большого файла
+            conn.setReadTimeout(300_000);
             conn.setRequestProperty("User-Agent", "Mozilla/5.0 Collins-Paper-Plugin");
 
             int code = conn.getResponseCode();
@@ -159,8 +203,8 @@ public final class ToolsDownloader {
             log("Downloading FFmpeg " + (contentLength > 0 ? (contentLength / 1024 / 1024) + " MB" : "..."));
 
             try (InputStream in = conn.getInputStream();
-                 var out = Files.newOutputStream(zipTmp)) {
-                
+                 var out = Files.newOutputStream(archiveTmp)) {
+
                 byte[] buf = new byte[64 * 1024];
                 long written = 0;
                 int r;
@@ -179,42 +223,198 @@ public final class ToolsDownloader {
             }
             conn.disconnect();
 
-            log("Extracting ffprobe.exe...");
-            boolean extracted = false;
-            try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipTmp))) {
-                ZipEntry entry;
-                while ((entry = zis.getNextEntry()) != null) {
-                    String name = entry.getName();
-                    if (name.endsWith("ffprobe.exe") && !entry.isDirectory()) {
-                        log("Found: " + name);
-                        Files.copy(zis, ffprobeTarget, StandardCopyOption.REPLACE_EXISTING);
-                        extracted = true;
-                    }
-                    if (name.endsWith("ffmpeg.exe") && !entry.isDirectory()) {
-                        Path ffmpeg = toolsDir.resolve("ffmpeg.exe");
-                        if (!Files.exists(ffmpeg)) {
-                            Files.copy(zis, ffmpeg, StandardCopyOption.REPLACE_EXISTING);
-                            log("Also extracted: ffmpeg.exe");
-                        }
-                    }
-                    zis.closeEntry();
-                }
-            }
+            log("Extracting ffprobe...");
+            boolean extracted = isZip
+                ? extractFromZip(archiveTmp, ffprobeTarget)
+                : extractFromTarXz(archiveTmp, ffprobeTarget);
 
-            Files.deleteIfExists(zipTmp);
+            Files.deleteIfExists(archiveTmp);
 
             if (extracted) {
-                log("ffprobe.exe extracted successfully");
+                log("ffprobe extracted successfully");
+                ensureExecutable(ffprobeTarget);
+                Path ffmpeg = toolsDir.resolve(ffmpegBinaryName());
+                if (Files.isRegularFile(ffmpeg)) {
+                    ensureExecutable(ffmpeg);
+                }
                 return true;
             } else {
-                log("ffprobe.exe not found in archive!");
+                log("ffprobe not found in archive!");
                 return false;
             }
 
         } catch (Exception e) {
             log("FFmpeg download/extract error: " + e.getMessage());
+            try { Files.deleteIfExists(archiveTmp); } catch (Exception ignored) {}
             return false;
         }
+    }
+
+    private static boolean extractFromZip(Path zipFile, Path ffprobeTarget) throws IOException {
+        boolean extracted = false;
+        String ffprobeName = ffprobeBinaryName();
+        String ffmpegName = ffmpegBinaryName();
+        try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipFile))) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                String name = entry.getName();
+                if (entry.isDirectory()) { zis.closeEntry(); continue; }
+                if (name.endsWith("/" + ffprobeName) || name.endsWith("\\" + ffprobeName) || name.equals(ffprobeName)) {
+                    log("Found: " + name);
+                    Files.copy(zis, ffprobeTarget, StandardCopyOption.REPLACE_EXISTING);
+                    extracted = true;
+                } else if (name.endsWith("/" + ffmpegName) || name.endsWith("\\" + ffmpegName) || name.equals(ffmpegName)) {
+                    Path ffmpeg = toolsDir.resolve(ffmpegName);
+                    if (!Files.exists(ffmpeg)) {
+                        Files.copy(zis, ffmpeg, StandardCopyOption.REPLACE_EXISTING);
+                        log("Also extracted: " + ffmpegName);
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+        return extracted;
+    }
+
+    /**
+     * Extract {@code ffprobe} (and {@code ffmpeg} if present) from a
+     * {@code .tar.xz} archive by shelling out to the system {@code tar}.
+     * Every Linux / macOS box has a {@code tar} that understands
+     * {@code -J} (xz), so this avoids pulling in Apache Commons Compress
+     * just for the bootstrap path.
+     */
+    private static boolean extractFromTarXz(Path archive, Path ffprobeTarget) {
+        Path stage = null;
+        try {
+            stage = Files.createTempDirectory(toolsDir, "ffmpeg-stage-");
+            ProcessBuilder pb = new ProcessBuilder("tar", "-xJf", archive.toAbsolutePath().toString(),
+                "-C", stage.toAbsolutePath().toString());
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            try (var in = p.getInputStream()) {
+                byte[] buf = new byte[8 * 1024];
+                while (in.read(buf) >= 0) { /* drain */ }
+            }
+            int rc = p.waitFor();
+            if (rc != 0) {
+                log("tar exited with code " + rc + " while extracting " + archive.getFileName());
+                return false;
+            }
+
+            String ffprobeName = ffprobeBinaryName();
+            String ffmpegName = ffmpegBinaryName();
+            Path[] found = new Path[] { null, null };
+            try (var stream = Files.walk(stage)) {
+                stream.filter(Files::isRegularFile).forEach(path -> {
+                    String fileName = path.getFileName().toString();
+                    if (fileName.equals(ffprobeName) && found[0] == null) found[0] = path;
+                    else if (fileName.equals(ffmpegName) && found[1] == null) found[1] = path;
+                });
+            }
+
+            if (found[0] == null) return false;
+            Files.copy(found[0], ffprobeTarget, StandardCopyOption.REPLACE_EXISTING);
+            log("Found: " + found[0]);
+            if (found[1] != null) {
+                Path ffmpeg = toolsDir.resolve(ffmpegName);
+                if (!Files.exists(ffmpeg)) {
+                    Files.copy(found[1], ffmpeg, StandardCopyOption.REPLACE_EXISTING);
+                    log("Also extracted: " + ffmpegName);
+                }
+            }
+            return true;
+        } catch (Exception e) {
+            log("tar extract error: " + e.getMessage());
+            return false;
+        } finally {
+            if (stage != null) deleteRecursive(stage);
+        }
+    }
+
+    private static void deleteRecursive(Path root) {
+        try (var stream = Files.walk(root)) {
+            stream.sorted((a, b) -> b.getNameCount() - a.getNameCount()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (Exception ignored) {}
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Mark {@code path} as executable on POSIX systems. Without this, the
+     * downloaded yt-dlp / ffprobe binary is created with the JVM's default
+     * 644 permissions and {@link ProcessBuilder#start()} fails with
+     * {@code IOException: Cannot run program ...: error=13, Permission
+     * denied} - the exact symptom users hit on Linux servers.
+     */
+    private static void ensureExecutable(Path path) {
+        if (!POSIX) return;
+        try {
+            Set<PosixFilePermission> perms = EnumSet.of(
+                PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE,
+                PosixFilePermission.GROUP_READ, PosixFilePermission.GROUP_EXECUTE,
+                PosixFilePermission.OTHERS_READ, PosixFilePermission.OTHERS_EXECUTE);
+            Files.setPosixFilePermissions(path, perms);
+        } catch (Exception e) {
+            // Fall back to the boolean API so we at least try to set the
+            // owner-execute bit on filesystems where POSIX views aren't
+            // available (e.g. some FUSE mounts).
+            try {
+                path.toFile().setExecutable(true, false);
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private static String ytdlpBinaryName() {
+        return HOST_OS == Os.WINDOWS ? "yt-dlp.exe" : "yt-dlp";
+    }
+
+    private static String ffprobeBinaryName() {
+        return HOST_OS == Os.WINDOWS ? "ffprobe.exe" : "ffprobe";
+    }
+
+    private static String ffmpegBinaryName() {
+        return HOST_OS == Os.WINDOWS ? "ffmpeg.exe" : "ffmpeg";
+    }
+
+    private static String ytdlpUrl() {
+        String base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
+        return switch (HOST_OS) {
+            case WINDOWS -> base + "yt-dlp.exe";
+            case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "yt-dlp_linux_aarch64" : "yt-dlp_linux");
+            case MACOS -> base + "yt-dlp_macos";
+            case OTHER -> null;
+        };
+    }
+
+    /**
+     * BtbN ships builds for Windows, Linux x64, Linux arm64 and macOS x64.
+     * We don't try to handle Apple Silicon yet; on arm64 macOS we tell the
+     * user to install ffmpeg via Homebrew since BtbN's macOS binary is x64
+     * only and would only work under Rosetta.
+     */
+    private static String ffmpegArchiveUrl() {
+        String base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-";
+        return switch (HOST_OS) {
+            case WINDOWS -> base + "win64-gpl.zip";
+            case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "linuxarm64-gpl.tar.xz" : "linux64-gpl.tar.xz");
+            case MACOS -> HOST_ARCH == Arch.ARM64 ? null : base + "osx64-gpl.tar.xz";
+            case OTHER -> null;
+        };
+    }
+
+    private static Os detectOs() {
+        String name = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
+        if (name.contains("win")) return Os.WINDOWS;
+        if (name.contains("mac") || name.contains("darwin")) return Os.MACOS;
+        if (name.contains("nix") || name.contains("nux") || name.contains("aix")) return Os.LINUX;
+        return Os.OTHER;
+    }
+
+    private static Arch detectArch() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+        if (arch.contains("aarch64") || arch.contains("arm64")) return Arch.ARM64;
+        if (arch.contains("amd64") || arch.contains("x86_64") || arch.contains("x64")) return Arch.X64;
+        return Arch.OTHER;
     }
 
     private static void log(String msg) {
