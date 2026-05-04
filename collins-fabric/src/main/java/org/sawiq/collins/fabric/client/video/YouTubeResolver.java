@@ -43,8 +43,20 @@ public final class YouTubeResolver {
     private static final Set<Process> ACTIVE_DOWNLOAD_PROCESSES = ConcurrentHashMap.newKeySet();
 
     /**
+     * Per-download cleanup hook keyed by the spawned yt-dlp process. Runs
+     * AFTER the process is forcibly terminated to delete the partial cache
+     * artifacts ({@code .part}, {@code .ytdl}, {@code .frag*}, the
+     * not-yet-finalised {@code .mkv}/{@code .mp4}, etc.) the cancelled
+     * download left on disk. Without this, hitting stop on a 2 GB video
+     * mid-download left a 1.9 GB carcass in {@code collins-cache/} that
+     * was only cleaned up the next time the same id was re-downloaded.
+     */
+    private static final java.util.Map<Process, Runnable> ACTIVE_DOWNLOAD_CLEANUPS = new ConcurrentHashMap<>();
+
+    /**
      * Forcibly terminates every yt-dlp / ffmpeg subprocess that is
-     * currently downloading or probing a stream. Idempotent and safe to
+     * currently downloading or probing a stream and removes the partial
+     * artifacts each killed download left behind. Idempotent and safe to
      * call from any thread; called by {@link VideoPlayer#stop()} so a
      * user-initiated stop releases native resources immediately rather
      * than waiting for the in-flight download to complete.
@@ -55,9 +67,23 @@ public final class YouTubeResolver {
         // where a freshly-started download is wiped from the set before its
         // owning thread can track it.
         for (Process p : ACTIVE_DOWNLOAD_PROCESSES.toArray(new Process[0])) {
+            Runnable cleanup = ACTIVE_DOWNLOAD_CLEANUPS.remove(p);
             try {
                 p.destroyForcibly();
             } catch (Exception ignored) {
+            }
+            if (cleanup != null) {
+                // Defer the on-disk cleanup until the OS has fully reaped
+                // the child: on Windows yt-dlp / ffmpeg may still hold a
+                // write handle to the partial file for a brief moment
+                // after destroyForcibly() returns, and Files.delete will
+                // throw AccessDeniedException in that window.
+                p.onExit().thenRun(() -> {
+                    try {
+                        cleanup.run();
+                    } catch (Exception ignored) {
+                    }
+                });
             }
         }
     }
@@ -808,6 +834,10 @@ public final class YouTubeResolver {
 
         Process p = pb.start();
         ACTIVE_DOWNLOAD_PROCESSES.add(p);
+        // Register the partial-artifact cleanup BEFORE any blocking IO so
+        // a near-instant cancelActiveDownloads() (e.g. user stops video
+        // milliseconds after starting it) still finds the hook.
+        ACTIVE_DOWNLOAD_CLEANUPS.put(p, () -> deleteTempArtifacts(cacheDir, cachePrefix));
         StringBuilder output = new StringBuilder();
         String finalPath = null;
         long durationMs = 0L;
@@ -861,6 +891,10 @@ public final class YouTubeResolver {
             // cancelActiveDownloads() doesn't try to destroy an already-dead
             // pid (typically harmless but creates noisy logs on some JDKs).
             ACTIVE_DOWNLOAD_PROCESSES.remove(p);
+            // Drop the cleanup hook on the normal-exit path. Leaving it in
+            // would cause a later, unrelated cancel to nuke a perfectly
+            // good cached file just because it shares the same prefix.
+            ACTIVE_DOWNLOAD_CLEANUPS.remove(p);
         }
         monitorRunning.set(false);
         if (progressMonitor != null) {
