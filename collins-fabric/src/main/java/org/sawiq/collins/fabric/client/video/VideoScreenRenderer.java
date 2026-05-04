@@ -2,6 +2,8 @@ package org.sawiq.collins.fabric.client.video;
 
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
+import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.MappingResolver;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.render.LightmapTextureManager;
 import net.minecraft.client.render.OverlayTexture;
@@ -9,10 +11,14 @@ import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexConsumerProvider;
 import net.minecraft.client.util.math.MatrixStack;
+import net.minecraft.util.Identifier;
 import net.minecraft.util.math.Vec3d;
 import org.joml.Vector3f;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
+
+import java.lang.reflect.Method;
+import java.util.function.Function;
 
 /**
  * Renders in-world video screens as quads at the end of the world render
@@ -29,6 +35,7 @@ public final class VideoScreenRenderer {
     private static final double EPS = 0.01;
 
     private static volatile boolean renderLayerWarned = false;
+    private static volatile Function<Identifier, RenderLayer> RENDER_LAYER_LOOKUP;
 
     private VideoScreenRenderer() {}
 
@@ -68,23 +75,78 @@ public final class VideoScreenRenderer {
 
             if (!CollinsClientConfig.get().renderVideo) return;
 
+            Function<Identifier, RenderLayer> lookup = renderLayerLookup();
+            if (lookup == null) return;
+
             for (VideoScreen screen : VideoScreenManager.all()) {
                 ScreenState st = screen.state();
                 if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
                 screen.renderPlayback();
                 if (!screen.hasTexture()) continue;
-                // RenderLayer.getEntityCutoutNoCullZOffset exists in 1.21.10
-                // Yarn (intermediary class_1921.method_28116). The same
-                // intermediary id carries through to 1.21.11 even though Yarn
-                // moved the method to RenderLayers there, so a 1.21.10-built
-                // jar works on both versions.
-                RenderLayer layer = RenderLayer.getEntityCutoutNoCullZOffset(screen.textureId());
+                RenderLayer layer = lookup.apply(screen.textureId());
+                if (layer == null) continue;
                 drawScreen(entry, consumers, cam, st, layer);
             }
         } finally {
             // Always balance push() to keep vanilla's pose stack empty,
             // otherwise MC throws "Pose stack not empty" the same frame.
             matrices.pop();
+        }
+    }
+
+    /**
+     * Resolve {@code entityCutoutNoCullZOffset(Identifier)} at runtime. MC
+     * intermediary ids for this method are NOT stable across versions: in
+     * 1.21.10 it is {@code class_1921#method_28116}, but 1.21.11 moved it
+     * to a new {@code class_12249} (RenderLayers) with the new id
+     * {@code method_75996}. A compile-time static call ends up referencing
+     * only one of those and crashes on the other. This resolver tries both
+     * via {@link MappingResolver} and caches the first hit.
+     */
+    private static Function<Identifier, RenderLayer> renderLayerLookup() {
+        Function<Identifier, RenderLayer> cached = RENDER_LAYER_LOOKUP;
+        if (cached != null) return cached;
+
+        String idDesc = "(Lnet/minecraft/class_2960;)Lnet/minecraft/class_1921;";
+        MappingResolver mr = FabricLoader.getInstance().getMappingResolver();
+
+        Function<Identifier, RenderLayer> resolved = tryStatic(mr,
+                "net.minecraft.class_1921", "method_28116", idDesc);
+        if (resolved == null) {
+            resolved = tryStatic(mr,
+                    "net.minecraft.class_12249", "method_75996", idDesc);
+        }
+        if (resolved == null) {
+            if (!renderLayerWarned) {
+                renderLayerWarned = true;
+                warn("could not resolve entity cutout render layer; video screens disabled", null);
+            }
+            resolved = id -> null;
+        }
+        RENDER_LAYER_LOOKUP = resolved;
+        return resolved;
+    }
+
+    private static Function<Identifier, RenderLayer> tryStatic(MappingResolver mr,
+                                                               String intermediaryClass,
+                                                               String intermediaryMethod,
+                                                               String intermediaryDesc) {
+        try {
+            String runtimeClass = mr.mapClassName("intermediary", intermediaryClass);
+            String runtimeMethod = mr.mapMethodName("intermediary", intermediaryClass, intermediaryMethod, intermediaryDesc);
+            Class<?> cls = Class.forName(runtimeClass);
+            Method m = cls.getMethod(runtimeMethod, Identifier.class);
+            if (!java.lang.reflect.Modifier.isStatic(m.getModifiers())) return null;
+            if (!RenderLayer.class.isAssignableFrom(m.getReturnType())) return null;
+            return id -> {
+                try {
+                    return (RenderLayer) m.invoke(null, id);
+                } catch (Throwable e) {
+                    return null;
+                }
+            };
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 
