@@ -225,7 +225,18 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         boolean inRadius = isInHearRadius(playerPos, radiusBlocks);
         long nowMs = System.currentTimeMillis();
 
+        boolean justResumedFromRadiusPause = false;
         if (inRadius) {
+            // Detect re-entry after a real out-of-radius gap: the HUD
+            // timeline stays displayFrozen while we are away, and the
+            // decoder keeps feeding stale frames into frameQueue; if we
+            // simply clear pausedByRadius the render keeps showing old
+            // frames and the timeline never unfreezes because
+            // shouldHardResync() bails out while displayFrozen is true.
+            if (pausedByRadius && outOfRadiusSinceMs > 0 && (nowMs - outOfRadiusSinceMs) > 500L) {
+                justResumedFromRadiusPause = true;
+            }
+
             lastInRadiusAtMs = nowMs;
             pausedByRadius = false;
             outOfRadiusSinceMs = 0;
@@ -265,6 +276,14 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         float gain = Math.max(0f, globalVolume) * Math.max(0f, state.volume()) * cfg.localVolumeMultiplier();
 
         if (player == null) player = new VideoPlayer(this);
+
+        if (justResumedFromRadiusPause && started) {
+            // Bypass the normal resync cooldown so we always re-anchor
+            // playback when the player steps back into the hear radius.
+            lastHardResyncAtMs = 0;
+            hardResync(posMs, gain);
+            return;
+        }
 
         if (ended && endedUrl.equals(state.url())) {
             if (player != null && player.isRunning()) {
