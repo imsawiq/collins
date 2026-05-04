@@ -49,4 +49,8 @@ java {
 
 tasks.named("remapJar") {
     addNestedDependencies = true
+    archiveFileName = "${project.archives_base_name}-${project.version}-mc${project.minecraft_version}.jar"
 }
+
+
+
