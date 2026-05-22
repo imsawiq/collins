@@ -3,10 +3,11 @@ package org.sawiq.collins.fabric.client;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.TitleScreen;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.TitleScreen;
 import org.sawiq.collins.fabric.client.command.CollinsClientCommands;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
+import org.sawiq.collins.fabric.client.hud.VideoHudOverlay;
 import org.sawiq.collins.fabric.client.net.CollinsNet;
 import org.sawiq.collins.fabric.client.update.ModrinthVersionChecker;
 import org.sawiq.collins.fabric.client.update.UpdateAvailableScreen;
@@ -25,6 +26,7 @@ public final class CollinsFabricClient implements ClientModInitializer {
         CollinsClientConfig.get();
         CollinsNet.initClientReceiver();
         VideoScreenRenderer.init();
+        VideoHudOverlay.init();
         CollinsClientCommands.init();
 
         // Prefetch yt-dlp + ffmpeg in the background so the first YouTube/Twitch URL
@@ -42,7 +44,7 @@ public final class CollinsFabricClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (this.pendingUpdate != null
                     && !this.updateScreenShown
-                    && client.currentScreen instanceof TitleScreen titleScreen) {
+                    && client.screen instanceof TitleScreen titleScreen) {
                 this.updateScreenShown = true;
                 client.setScreen(new UpdateAvailableScreen(
                         titleScreen,
@@ -53,8 +55,8 @@ public final class CollinsFabricClient implements ClientModInitializer {
         });
 
         this.versionChecker.checkAsync().thenAccept(result -> {
-            if (result != null && MinecraftClient.getInstance() != null) {
-                MinecraftClient.getInstance().execute(() -> this.pendingUpdate = result);
+            if (result != null && Minecraft.getInstance() != null) {
+                Minecraft.getInstance().execute(() -> this.pendingUpdate = result);
             }
         });
 

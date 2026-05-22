@@ -1,80 +1,118 @@
 package org.sawiq.collins.fabric.client.hud;
 
-import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.ChatScreen;
-import net.minecraft.client.render.RenderTickCounter;
-import net.minecraft.text.Text;
-import net.minecraft.util.Formatting;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
+import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
+import net.minecraft.client.DeltaTracker;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.network.chat.Component;
+import net.minecraft.ChatFormatting;
+import net.minecraft.resources.Identifier;
 import org.sawiq.collins.fabric.client.util.TimeFormatUtil;
 import org.sawiq.collins.fabric.client.video.VideoScreen;
 import org.sawiq.collins.fabric.client.video.VideoScreenManager;
 
+/**
+ * In-game HUD overlay rendered just above the hotbar that surfaces the
+ * progress / position / state of the screen the player is currently
+ * standing in front of.
+ *
+ * <p>26.1 ported. Fabric removed {@code HudRenderCallback} in 26.1 in
+ * favour of {@code HudElementRegistry} together with a deferred
+ * {@code HudElement#extractRenderState(GuiGraphicsExtractor, DeltaTracker)}
+ * model. We attach our element right before the vanilla {@code CHAT}
+ * layer so it draws above status bars / experience but below the chat
+ * window — matching the position the old {@code HudRenderCallback}
+ * implementation used (y = screenHeight - 59, just above the hotbar).</p>
+ *
+ * <p>1.21.6+ also switched text colours from RGB to ARGB. All colour
+ * literals here are explicitly opaque ({@code 0xFF......}) so they
+ * render correctly with no transparency.</p>
+ */
 public final class VideoHudOverlay {
+
+    private static final Identifier ELEMENT_ID =
+            Identifier.fromNamespaceAndPath("collins", "video_overlay");
+
+    // ARGB colour constants. The high byte is the opacity — without it
+    // the renderer treats the text as fully transparent in 1.21.6+.
+    private static final int COLOR_DOWNLOADING = 0xFFFFFF00; // yellow
+    private static final int COLOR_ENDED = 0xFF55FF55;       // light green
+    private static final int COLOR_HINT = 0xFF888888;        // grey hint
+    private static final int COLOR_TIMELINE = 0xFF00FF00;    // bright green
 
     private VideoHudOverlay() {
     }
 
     public static void init() {
-        HudRenderCallback.EVENT.register(VideoHudOverlay::render);
+        HudElementRegistry.attachElementBefore(
+                VanillaHudElements.CHAT,
+                ELEMENT_ID,
+                VideoHudOverlay::extract);
     }
 
-    private static void render(DrawContext ctx, RenderTickCounter tickCounter) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null || client.textRenderer == null) return;
-        if (client.currentScreen instanceof ChatScreen) return;
+    private static void extract(GuiGraphicsExtractor graphics, DeltaTracker deltaTracker) {
+        Minecraft client = Minecraft.getInstance();
+        if (client == null || client.player == null || client.font == null) return;
+        // Hide the overlay while the chat is open so it does not clash
+        // with the chat input. The previous 1.21.x impl used the same
+        // gate against ChatScreen.
+        if (client.screen instanceof ChatScreen) return;
 
-        VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.getPos());
+        VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.position());
         if (screen == null) return;
 
-        int sw = client.getWindow().getScaledWidth();
-        int sh = client.getWindow().getScaledHeight();
+        int sw = client.getWindow().getGuiScaledWidth();
+        int sh = client.getWindow().getGuiScaledHeight();
         int y = sh - 59;
+        int centerX = sw / 2;
 
         if (screen.isDownloading()) {
             int pct = Math.max(0, screen.getDownloadPercent());
             long dlMb = Math.max(0L, screen.getDownloadedMb());
             long totalMb = Math.max(0L, screen.getDownloadTotalMb());
-            Text text;
             String platform = screen.getPlatformLabel();
+
+            Component text;
             if (screen.isDownloadingYtdlp()) {
-                text = Text.translatable("text.collins.youtube.installing_progress", pct);
+                text = Component.translatable("text.collins.youtube.installing_progress", pct);
             } else if (screen.isDownloadingPlatformVideo() && totalMb > 0) {
-                text = Text.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb);
+                text = Component.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb);
             } else if (screen.isDownloadingPlatformVideo() && pct > 0) {
-                text = Text.translatable("text.collins.platform.download.progress", platform, pct);
+                text = Component.translatable("text.collins.platform.download.progress", platform, pct);
             } else if (screen.isDownloadingPlatformVideo() && dlMb > 0) {
-                text = Text.translatable("text.collins.platform.download.size", platform, dlMb);
+                text = Component.translatable("text.collins.platform.download.size", platform, dlMb);
             } else if (screen.isDownloadingPlatformVideo()) {
                 if (screen.hasDownloadProgressReceived()) {
-                    text = Text.translatable("text.collins.platform.download.progress", platform, 0);
+                    text = Component.translatable("text.collins.platform.download.progress", platform, 0);
                 } else {
-                    text = Text.translatable("text.collins.platform.preparing", platform);
+                    text = Component.translatable("text.collins.platform.preparing", platform);
                 }
             } else if (screen.isResolvingPlatformVideo()) {
-                text = Text.translatable("text.collins.platform.preparing", platform);
+                text = Component.translatable("text.collins.platform.preparing", platform);
             } else if (totalMb > 0) {
-                text = Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb);
+                text = Component.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb);
             } else if (pct > 0) {
-                text = Text.translatable("text.collins.video.download.progress", pct);
+                text = Component.translatable("text.collins.video.download.progress", pct);
             } else if (dlMb > 0) {
-                text = Text.translatable("text.collins.video.download.size", dlMb);
+                text = Component.translatable("text.collins.video.download.size", dlMb);
             } else {
-                text = Text.translatable("text.collins.video.preparing");
+                text = Component.translatable("text.collins.video.preparing");
             }
-            ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0xFFFF00);
+
+            graphics.centeredText(client.font, text, centerX, y, COLOR_DOWNLOADING);
             return;
         }
 
         if (screen.isEnded()) {
-            Text text = screen.hasCachedFile()
-                ? Text.translatable("text.collins.video.ended.cached", screen.getCachedFileSizeMb())
-                : Text.translatable("text.collins.video.ended");
-            ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0x55FF55);
+            Component text = screen.hasCachedFile()
+                    ? Component.translatable("text.collins.video.ended.cached", screen.getCachedFileSizeMb())
+                    : Component.translatable("text.collins.video.ended");
+            graphics.centeredText(client.font, text, centerX, y, COLOR_ENDED);
             if (screen.hasCachedFile()) {
-                Text hint = Text.translatable("text.collins.video.delete_hint");
-                ctx.drawCenteredTextWithShadow(client.textRenderer, hint, sw / 2, y + 12, 0x888888);
+                Component hint = Component.translatable("text.collins.video.delete_hint");
+                graphics.centeredText(client.font, hint, centerX, y + 12, COLOR_HINT);
             }
             return;
         }
@@ -87,10 +125,11 @@ public final class VideoHudOverlay {
         long posMs = screen.currentPosMsForDisplay(serverNowMs);
         long durMs = screen.durationMs();
 
-        Text text = (durMs > 0)
-            ? Text.translatable("text.collins.timeline.short", TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
-            : Text.literal(TimeFormatUtil.formatMs(posMs)).formatted(Formatting.GREEN);
+        Component text = (durMs > 0)
+                ? Component.translatable("text.collins.timeline.short",
+                        TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
+                : Component.literal(TimeFormatUtil.formatMs(posMs)).withStyle(ChatFormatting.GREEN);
 
-        ctx.drawCenteredTextWithShadow(client.textRenderer, text, sw / 2, y, 0x00FF00);
+        graphics.centeredText(client.font, text, centerX, y, COLOR_TIMELINE);
     }
 }

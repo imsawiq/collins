@@ -1,16 +1,24 @@
 package org.sawiq.collins.fabric.client.update;
 
 import net.fabricmc.loader.api.FabricLoader;
-import net.minecraft.client.gui.DrawContext;
-import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
-import net.minecraft.text.Text;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.network.chat.Component;
 import net.minecraft.util.Util;
+
+import java.net.URI;
+import java.net.URISyntaxException;
 
 /**
  * Title-screen overlay that informs the player a newer release of
  * {@code collins-fabric} is available on Modrinth and lets them open the
  * project page in their default browser.
+ *
+ * <p>26.1: the rendering pipeline switched from immediate-mode
+ * {@code render(GuiGraphics, ...)} to the deferred extraction API
+ * {@code extractRenderState(GuiGraphicsExtractor, ...)}, so all drawing
+ * happens via {@link GuiGraphicsExtractor#centeredText} below.</p>
  */
 public final class UpdateAvailableScreen extends Screen {
     private final Screen parent;
@@ -19,7 +27,7 @@ public final class UpdateAvailableScreen extends Screen {
     private final String url;
 
     public UpdateAvailableScreen(Screen parent, String newVersion, String url) {
-        super(Text.translatable("text.collins.update.title"));
+        super(Component.translatable("text.collins.update.title"));
         this.parent = parent;
         this.newVersion = newVersion;
         this.url = url;
@@ -34,47 +42,49 @@ public final class UpdateAvailableScreen extends Screen {
         int centerX = this.width / 2;
         int centerY = this.height / 2;
 
-        addDrawableChild(ButtonWidget.builder(
-                        Text.translatable("text.collins.update.open_page"),
-                        button -> Util.getOperatingSystem().open(this.url))
-                .dimensions(centerX - 100, centerY + 24, 200, 20)
+        addRenderableWidget(Button.builder(
+                        Component.translatable("text.collins.update.open_page"),
+                        button -> openUrl(this.url))
+                .bounds(centerX - 100, centerY + 24, 200, 20)
                 .build());
 
-        addDrawableChild(ButtonWidget.builder(
-                        Text.translatable("text.collins.update.dismiss"),
-                        button -> close())
-                .dimensions(centerX - 100, centerY + 50, 200, 20)
+        addRenderableWidget(Button.builder(
+                        Component.translatable("text.collins.update.dismiss"),
+                        button -> onClose())
+                .bounds(centerX - 100, centerY + 50, 200, 20)
                 .build());
     }
 
     @Override
-    public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-        super.render(context, mouseX, mouseY, delta);
+    public void extractRenderState(GuiGraphicsExtractor extractor, int mouseX, int mouseY, float delta) {
+        super.extractRenderState(extractor, mouseX, mouseY, delta);
 
         int centerX = this.width / 2;
         int baseY = this.height / 2 - 40;
 
-        drawCenteredText(context, this.title, centerX, baseY, 0xFFFFFFFF);
-        drawCenteredText(context, Text.translatable("text.collins.update.subtitle", this.newVersion),
+        extractor.centeredText(this.font, this.title, centerX, baseY, 0xFFFFFFFF);
+        extractor.centeredText(this.font,
+                Component.translatable("text.collins.update.subtitle", this.newVersion),
                 centerX, baseY + 18, 0xFF55FF55);
-        drawCenteredText(context, Text.translatable("text.collins.update.current", this.currentVersion),
+        extractor.centeredText(this.font,
+                Component.translatable("text.collins.update.current", this.currentVersion),
                 centerX, baseY + 32, 0xFFAAAAAA);
     }
 
     @Override
-    public void close() {
-        if (this.client == null) {
+    public void onClose() {
+        if (this.minecraft == null) {
             return;
         }
-        if (this.parent != null) {
-            this.client.setScreen(this.parent);
-        } else {
-            this.client.setScreen(null);
-        }
+        this.minecraft.setScreen(this.parent);
     }
 
-    private void drawCenteredText(DrawContext context, Text text, int centerX, int y, int color) {
-        int width = this.textRenderer.getWidth(text);
-        context.drawTextWithShadow(this.textRenderer, text, centerX - width / 2, y, color);
+    private static void openUrl(String url) {
+        try {
+            Util.getPlatform().openUri(new URI(url));
+        } catch (URISyntaxException ignored) {
+            // Modrinth URLs are statically defined; misformed URIs would be a
+            // programmer error rather than something the user can recover from.
+        }
     }
 }

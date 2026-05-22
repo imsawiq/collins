@@ -8,9 +8,9 @@ import org.sawiq.collins.fabric.net.CollinsMainS2CPayload;
 public final class CollinsFabricMod implements ModInitializer {
     @Override
     public void onInitialize() {
-        // S2C - сервер -> клиент
-        PayloadTypeRegistry.playS2C().register(CollinsMainS2CPayload.ID, CollinsMainS2CPayload.CODEC);
-        // C2S - клиент -> сервер
-        PayloadTypeRegistry.playC2S().register(CollinsMainC2SPayload.ID, CollinsMainC2SPayload.CODEC);
+        // S2C — server to client
+        PayloadTypeRegistry.clientboundPlay().register(CollinsMainS2CPayload.TYPE, CollinsMainS2CPayload.STREAM_CODEC);
+        // C2S — client to server
+        PayloadTypeRegistry.serverboundPlay().register(CollinsMainC2SPayload.TYPE, CollinsMainC2SPayload.STREAM_CODEC);
     }
 }

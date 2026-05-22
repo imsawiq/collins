@@ -1,17 +1,20 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
-import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.render.Camera;
-import net.minecraft.client.render.LightmapTextureManager;
-import net.minecraft.client.render.OverlayTexture;
-import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.VertexConsumer;
-import net.minecraft.client.render.VertexConsumerProvider;
-import net.minecraft.client.util.math.MatrixStack;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.Vec3d;
+import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
+import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
+import net.minecraft.client.Camera;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.MultiBufferSource;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.resources.Identifier;
+import net.minecraft.util.Brightness;
+import net.minecraft.world.phys.Vec3;
 import org.joml.Vector3f;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
@@ -20,30 +23,46 @@ public final class VideoScreenRenderer {
 
     private static final double EPS = 0.01; // насколько “над блоком” рисуем
 
+    /**
+     * Lazy-initialised 1×1 dark grey texture used as a placeholder for
+     * screens that do not have a video texture yet (still resolving,
+     * ffmpeg failed, etc). Without this the screen plane was invisible
+     * and players could not tell whether {@code /collins create} actually
+     * produced a screen and where it ended up.
+     */
+    private static Identifier placeholderTexId;
+
     private VideoScreenRenderer() {}
 
     public static void init() {
-        WorldRenderEvents.LAST.register(VideoScreenRenderer::onLast);
+        // 26.1: Fabric replaced WorldRenderEvents.LAST with LevelRenderEvents.END_MAIN.
+        LevelRenderEvents.END_MAIN.register(VideoScreenRenderer::onLast);
     }
 
-    private static void onLast(WorldRenderContext ctx) {
-        MatrixStack matrices = ctx.matrixStack();
-        Camera camera = ctx.camera();
-        if (matrices == null || camera == null) return;
+    private static void onLast(LevelRenderContext ctx) {
+        PoseStack matrices = ctx.poseStack();
+        if (matrices == null) return;
 
-        MinecraftClient client = MinecraftClient.getInstance();
-        VertexConsumerProvider.Immediate consumers = client.getBufferBuilders().getEntityVertexConsumers();
+        Minecraft client = Minecraft.getInstance();
+        // 26.1: LevelRenderContext no longer exposes Camera directly. Pull it
+        // from the GameRenderer; END_MAIN runs after the camera has been
+        // updated for this frame, so this is the same camera Mojang itself
+        // is using for this render pass.
+        Camera camera = client.gameRenderer.getMainCamera();
+        if (camera == null) return;
 
-        Vec3d cam = camera.getPos();
+        MultiBufferSource.BufferSource consumers = client.renderBuffers().bufferSource();
 
-        matrices.push();
+        Vec3 cam = camera.position();
+
+        matrices.pushPose();
         matrices.translate(-cam.x, -cam.y, -cam.z);
 
-        MatrixStack.Entry entry = matrices.peek();
+        PoseStack.Pose entry = matrices.last();
 
         if (!CollinsClientConfig.get().renderVideo) {
-            matrices.pop();
-            consumers.draw();
+            matrices.popPose();
+            consumers.endBatch();
             return;
         }
 
@@ -51,29 +70,71 @@ public final class VideoScreenRenderer {
             ScreenState st = screen.state();
             if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
             screen.renderPlayback();
-            if (!screen.hasTexture()) continue;
-            drawScreen(entry, consumers, cam, st, screen.textureId());
+            // Рисуем плоскость даже без текстуры — пользователь должен видеть,
+            // что экран физически создан и где он стоит. Без видео заполняем
+            // тёмным фоном; с видео — натягиваем динамическую текстуру.
+            if (screen.hasTexture()) {
+                drawScreen(entry, consumers, cam, st, screen.textureId());
+            } else {
+                drawScreenPlaceholder(entry, consumers, cam, st);
+            }
         }
 
-        matrices.pop();
-        consumers.draw();
+        matrices.popPose();
+        consumers.endBatch();
     }
 
-    private static void drawScreen(MatrixStack.Entry entry,
-                                   VertexConsumerProvider consumers,
-                                   Vec3d cam,
+    private static void drawScreenPlaceholder(PoseStack.Pose entry,
+                                              MultiBufferSource consumers,
+                                              Vec3 cam,
+                                              ScreenState s) {
+        Identifier placeholder = placeholderTextureId();
+        if (placeholder == null) return;
+        drawScreen(entry, consumers, cam, s, placeholder);
+    }
+
+    /**
+     * Returns the lazy-initialised 1×1 dark-grey placeholder texture id.
+     * Returns {@code null} on the very first frame after launch when the
+     * texture manager is not yet ready - the caller simply skips drawing
+     * that frame and tries again next tick.
+     */
+    private static Identifier placeholderTextureId() {
+        if (placeholderTexId != null) return placeholderTexId;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc == null || mc.getTextureManager() == null) return null;
+        Identifier id = Identifier.fromNamespaceAndPath("collins", "screen/placeholder");
+        try {
+            DynamicTexture tex = new DynamicTexture("collins:placeholder", 1, 1, true);
+            NativeImage img = tex.getPixels();
+            if (img != null) {
+                // Opaque dark grey so empty screens are clearly visible
+                // against any background but do not steal focus from
+                // playing screens.
+                img.fillRect(0, 0, 1, 1, 0xFF202020);
+            }
+            tex.upload();
+            mc.getTextureManager().register(id, tex);
+            placeholderTexId = id;
+            return placeholderTexId;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static void drawScreen(PoseStack.Pose entry,
+                                   MultiBufferSource consumers,
+                                   Vec3 cam,
                                    ScreenState s,
                                    Identifier textureId) {
 
-        RenderLayer layer = RenderLayer.getEntityCutoutNoCullZOffset(textureId);
-        VertexConsumer vc = consumers.getBuffer(layer);
-
-        int minX = s.minX(), maxX = s.maxX();
+        RenderType layer = RenderTypes.entityCutoutZOffset(textureId);
+        VertexConsumer vc = consumers.getBuffer(layer);        int minX = s.minX(), maxX = s.maxX();
         int minY = s.minY(), maxY = s.maxY();
         int minZ = s.minZ(), maxZ = s.maxZ();
 
-        int overlay = OverlayTexture.DEFAULT_UV;
-        int light = LightmapTextureManager.MAX_LIGHT_COORDINATE;
+        int overlay = OverlayTexture.NO_OVERLAY;
+        int light = Brightness.FULL_BRIGHT.pack();
 
         if (s.axis() == 0) { // XY, Z фиксирован
             double zPlane = minZ + 0.5;
@@ -125,7 +186,7 @@ public final class VideoScreenRenderer {
         }
     }
 
-    private static void quadTwoSidedNoMirrorU(VertexConsumer vc, MatrixStack.Entry e,
+    private static void quadTwoSidedNoMirrorU(VertexConsumer vc, PoseStack.Pose e,
                                               boolean flipUFront,
                                               double x1, double y1, double z1,
                                               double x2, double y2, double z2,
@@ -159,20 +220,28 @@ public final class VideoScreenRenderer {
     }
 
     private static void v(VertexConsumer vc,
-                          MatrixStack.Entry entry,
+                          PoseStack.Pose entry,
                           double x, double y, double z,
                           float u, float v,
                           int overlay, int light,
                           float nx, float ny, float nz) {
 
         Vector3f p = new Vector3f((float) x, (float) y, (float) z);
-        entry.getPositionMatrix().transformPosition(p);
+        entry.pose().transformPosition(p);
 
         Vector3f n = new Vector3f(nx, ny, nz);
-        entry.getNormalMatrix().transform(n);
+        entry.normal().transform(n);
         n.normalize();
 
         int color = 0xFFFFFFFF;
-        vc.vertex(p.x, p.y, p.z, color, u, v, overlay, light, n.x, n.y, n.z);
+        // 26.1 / Mojang: VertexConsumer dropped the combined `vertex(...)`
+        // overload in favour of a chained API. Order matches the standard
+        // entity vertex format expected by RenderTypes.entityCutoutZOffset.
+        vc.addVertex(p.x, p.y, p.z)
+                .setColor(color)
+                .setUv(u, v)
+                .setOverlay(overlay)
+                .setLight(light)
+                .setNormal(n.x, n.y, n.z);
     }
 }

@@ -255,6 +255,14 @@ public final class YouTubeResolver {
     private static volatile int ytdlpDownloadProgress = 0;
     private static volatile boolean ffmpegAvailable = false;
     private static volatile boolean ffmpegChecked = false;
+    /**
+     * Absolute path to the ffmpeg executable that was actually resolved -
+     * either the bundled one under {@link #getToolsDir()} or one found on
+     * the system {@code PATH} (e.g. Homebrew's {@code /opt/homebrew/bin/ffmpeg}
+     * on Apple Silicon, where BtbN does not ship a build).
+     * {@code null} when no executable has been located yet.
+     */
+    private static volatile Path resolvedFfmpegPath = null;
     private static volatile long lastYtdlpRefreshAttemptMs = 0L;
 
     private record ResolvedUrl(String directUrl, String videoId, long resolvedAtMs, long durationMs) {
@@ -755,10 +763,23 @@ public final class YouTubeResolver {
         if (ffmpegChecked && ffmpegAvailable) return true;
 
         synchronized (TOOL_LOCK) {
-            Path ffmpeg = getFfmpegPath();
+            Path ffmpeg = getBundledFfmpegPath();
             if (Files.isRegularFile(ffmpeg)) {
+                resolvedFfmpegPath = ffmpeg;
                 ffmpegAvailable = true;
                 ffmpegChecked = true;
+                return true;
+            }
+
+            // No bundled binary - try to locate one on the system PATH so
+            // users on Apple Silicon (where BtbN does not ship a build)
+            // can simply `brew install ffmpeg` and have things work.
+            Path onPath = findFfmpegOnSystemPath();
+            if (onPath != null) {
+                resolvedFfmpegPath = onPath;
+                ffmpegAvailable = true;
+                ffmpegChecked = true;
+                dbg("ensureFfmpegAvailable: using system ffmpeg at " + onPath);
                 return true;
             }
 
@@ -779,7 +800,10 @@ public final class YouTubeResolver {
                     : extractFfmpegFromTarXz(archiveTmp, ffmpeg);
 
                 Files.deleteIfExists(archiveTmp);
-                if (ffmpegAvailable) ensureExecutable(ffmpeg);
+                if (ffmpegAvailable) {
+                    ensureExecutable(ffmpeg);
+                    resolvedFfmpegPath = ffmpeg;
+                }
                 ffmpegChecked = true;
                 return ffmpegAvailable;
             } catch (Exception e) {
@@ -787,6 +811,54 @@ public final class YouTubeResolver {
                 return false;
             }
         }
+    }
+
+    /**
+     * Look up {@code ffmpeg} (or {@code ffmpeg.exe} on Windows) on the
+     * system {@code PATH}. Returns the first executable match or {@code null}
+     * if none is found. This lets the resolver pick up a Homebrew /
+     * apt-get-installed ffmpeg on hosts (Apple Silicon, exotic Linux distros)
+     * where we have no auto-download URL.
+     */
+    private static Path findFfmpegOnSystemPath() {
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv == null || pathEnv.isEmpty()) return null;
+        String name = ffmpegBinaryName();
+        String sep = System.getProperty("path.separator", ":");
+        for (String dir : pathEnv.split(java.util.regex.Pattern.quote(sep))) {
+            if (dir == null || dir.isBlank()) continue;
+            try {
+                Path candidate = Path.of(dir, name);
+                if (Files.isRegularFile(candidate) && Files.isExecutable(candidate)) {
+                    return candidate.toAbsolutePath();
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        // Fallback for macOS GUI launches where PATH may not include
+        // /opt/homebrew/bin or /usr/local/bin (the launcher inherits
+        // a minimal environment from launchd).
+        if (HOST_OS == Os.MACOS) {
+            for (String fallback : new String[] {
+                    "/opt/homebrew/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg",
+                    "/usr/bin/ffmpeg" }) {
+                Path p = Path.of(fallback);
+                if (Files.isRegularFile(p) && Files.isExecutable(p)) {
+                    return p;
+                }
+            }
+        } else if (HOST_OS == Os.LINUX) {
+            for (String fallback : new String[] {
+                    "/usr/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg" }) {
+                Path p = Path.of(fallback);
+                if (Files.isRegularFile(p) && Files.isExecutable(p)) {
+                    return p;
+                }
+            }
+        }
+        return null;
     }
 
     private static boolean downloadFile(String urlStr, Path target, boolean trackProgress) throws Exception {
@@ -895,7 +967,7 @@ public final class YouTubeResolver {
         command.add("--progress-template");
         command.add("download:fragment:CollinsYTProgress:%(progress.percent)s:%(progress.downloaded_bytes)s:%(progress.total_bytes)s:%(progress.total_bytes_estimate)s:%(progress.fragment_index)s:%(progress.fragment_count)s");
         command.add("--ffmpeg-location");
-        command.add(getToolsDir().toString());
+        command.add(ffmpegLocationArg());
         command.add("--output");
         command.add(outputBase.toString());
         command.add("--print");
@@ -1282,7 +1354,7 @@ public final class YouTubeResolver {
         command.add("--no-cache-dir");
         command.add("--quiet");
         command.add("--socket-timeout");
-        command.add("10");
+        command.add("20");
         command.add("--retries");
         command.add("1");
         command.add("--extractor-retries");
@@ -1294,7 +1366,7 @@ public final class YouTubeResolver {
         }
         command.add(url);
 
-        ProcessResult result = runYtdlpCommand(command, 15, TimeUnit.SECONDS, "Collins-YTDLP-Meta");
+        ProcessResult result = runYtdlpCommand(command, 45, TimeUnit.SECONDS, "Collins-YTDLP-Meta");
         String output = result.output();
         StreamMeta meta = null;
         for (String line : output.split("\\R")) {
@@ -1336,7 +1408,7 @@ public final class YouTubeResolver {
         command.add("--no-check-certificates");
         command.add("--no-cache-dir");
         command.add("--socket-timeout");
-        command.add("10");
+        command.add("20");
         command.add("--retries");
         command.add("1");
         command.add("--extractor-retries");
@@ -1348,7 +1420,7 @@ public final class YouTubeResolver {
         }
         command.add(url);
 
-        ProcessResult result = runYtdlpCommand(command, 15, TimeUnit.SECONDS, "Collins-YTDLP-Direct");
+        ProcessResult result = runYtdlpCommand(command, 45, TimeUnit.SECONDS, "Collins-YTDLP-Direct");
         String directUrl = null;
         String output = result.output();
         for (String line : output.split("\\R")) {
@@ -1748,12 +1820,50 @@ public final class YouTubeResolver {
         }
     }
 
+    /**
+     * Path used by {@code --ffmpeg-location} and any other code that needs
+     * to know where ffmpeg lives. Falls back to the bundled location when
+     * we have not yet resolved a system binary.
+     */
     private static Path getFfmpegPath() {
+        Path resolved = resolvedFfmpegPath;
+        if (resolved != null) return resolved;
+        return getBundledFfmpegPath();
+    }
+
+    /**
+     * Path inside {@code collins-tools/} where we extract the auto-downloaded
+     * ffmpeg binary. Used for write operations during the bootstrap; reads
+     * should go through {@link #getFfmpegPath()} so a system-PATH binary
+     * is preferred when present.
+     */
+    private static Path getBundledFfmpegPath() {
         String name = ffmpegBinaryName();
         try {
             return getToolsDir().resolve(name);
         } catch (Exception e) {
             return Path.of("collins-tools", name);
+        }
+    }
+
+    /**
+     * Argument value for yt-dlp's {@code --ffmpeg-location}. yt-dlp accepts
+     * either a directory containing {@code ffmpeg} or the executable path
+     * itself; we hand it the parent directory of the resolved binary so it
+     * also picks up the sibling {@code ffprobe} when present (Homebrew /
+     * BtbN bundles both).
+     */
+    private static String ffmpegLocationArg() {
+        Path resolved = resolvedFfmpegPath;
+        if (resolved != null) {
+            Path parent = resolved.getParent();
+            if (parent != null) return parent.toString();
+            return resolved.toString();
+        }
+        try {
+            return getToolsDir().toString();
+        } catch (Exception e) {
+            return Path.of("collins-tools").toString();
         }
     }
 

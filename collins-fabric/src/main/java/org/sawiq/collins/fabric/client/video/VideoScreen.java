@@ -1,10 +1,10 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.texture.NativeImage;
-import net.minecraft.client.texture.NativeImageBackedTexture;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.client.Minecraft;
+import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.phys.Vec3;
 import org.lwjgl.system.MemoryUtil;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.state.ScreenState;
@@ -30,7 +30,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private ScreenState state;
 
     private Identifier texId;
-    private NativeImageBackedTexture texture;
+    private DynamicTexture texture;
 
     private VideoPlayer player;
 
@@ -194,7 +194,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     public Identifier textureId() { return texId; }
 
-    public void tickPlayback(Vec3d playerPos, int radiusBlocks, float globalVolume, long serverNowMs) {
+    public void tickPlayback(Vec3 playerPos, int radiusBlocks, float globalVolume, long serverNowMs) {
         long tickStart = System.nanoTime();
         
         // РґРёР°РіРЅРѕСЃС‚РёРєР°: РІСЂРµРјСЏ РјРµР¶РґСѓ tick() Рё РІСЂРµРјСЏ РІРЅСѓС‚СЂРё tick()
@@ -354,7 +354,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         uploadPendingFrameFast();
     }
 
-    private boolean isInHearRadius(Vec3d playerPos, int radiusBlocks) {
+    private boolean isInHearRadius(Vec3 playerPos, int radiusBlocks) {
         if (playerPos == null) return false;
         if (radiusBlocks <= 0) return true;
 
@@ -419,7 +419,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.videoFps = req.fps();
 
         if (texId == null) {
-            texId = Identifier.of("collins", "screen/" + state.name().toLowerCase());
+            texId = Identifier.fromNamespaceAndPath("collins", "screen/" + state.name().toLowerCase());
         }
 
         boolean sameTextureSize = texture != null && prevTexW == req.targetW() && prevTexH == req.targetH();
@@ -429,11 +429,11 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
 
         if (texture == null) {
-            texture = new NativeImageBackedTexture("collins:" + texId, texW, texH, true);
-            MinecraftClient.getInstance().getTextureManager().registerTexture(texId, texture);
+            texture = new DynamicTexture("collins:" + texId, texW, texH, true);
+            Minecraft.getInstance().getTextureManager().register(texId, texture);
         }
 
-        NativeImage imgForPtr = texture.getImage();
+        NativeImage imgForPtr = texture.getPixels();
         if (imgForPtr != null) {
             nativePtr = ((NativeImageAccessor) (Object) imgForPtr).collins$getPointer();
             nativeDst = MemoryUtil.memIntBuffer(nativePtr, texW * texH);
@@ -443,7 +443,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
 
         if (!sameTextureSize) {
-            NativeImage img = texture.getImage();
+            NativeImage img = texture.getPixels();
             if (img != null) {
                 img.fillRect(0, 0, texW, texH, 0xFF000000);
             }

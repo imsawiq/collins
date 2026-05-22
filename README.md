@@ -267,7 +267,8 @@ Server-side Paper plugin.
 
 ## Requirements
 
-- **Java 21**
+- **Java 25** (Gradle daemon and runtime; Mojang now ships unobfuscated jars
+  in 26.1, which requires Java 25 to launch and to build).
 - **Gradle** (use the included wrapper)
 
 ## Build

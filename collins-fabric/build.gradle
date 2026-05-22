@@ -1,5 +1,8 @@
 plugins {
-    id "fabric-loom" version "1.13.1"
+    // 26.1 introduced "Unobfuscated Loom" (no remapping). The plugin id is
+    // intentionally different from the legacy fabric-loom: see
+    // https://fabricmc.net/2026/03/14/261.html
+    id "net.fabricmc.fabric-loom" version "1.15.5"
     id "maven-publish"
 }
 
@@ -16,22 +19,35 @@ base {
 }
 
 dependencies {
+    // No more `mappings` block — Loom 1.15+ for 26.1 ships unobfuscated Minecraft.
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 
-    // Java-часть
-    modImplementation(include("org.bytedeco:javacv:1.5.12"))
-    modImplementation(include("org.bytedeco:javacpp:1.5.12"))
-    modImplementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12"))
+    // Native A/V stack — independent of Minecraft.
+    implementation(include("org.bytedeco:javacv:1.5.12"))
+    implementation(include("org.bytedeco:javacpp:1.5.12"))
+    implementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12"))
 
-    // Нативки ТОЛЬКО под Windows x64 (в них лежат jni*.dll, включая jniavutil)
-    modImplementation(include("org.bytedeco:javacpp:1.5.12:windows-x86_64"))
-    modImplementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:windows-x86_64-gpl"))
+    // Windows x64 native binaries with the JNI ffmpeg/javacpp layers (jniavutil etc.).
+    implementation(include("org.bytedeco:javacpp:1.5.12:windows-x86_64"))
+    implementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:windows-x86_64-gpl"))
 
-    modImplementation(include("maven.modrinth:cloth-config:15.0.140+fabric"))
-    modImplementation("maven.modrinth:modmenu:11.0.3")
+    // macOS Apple Silicon native binaries — required for FFmpegFrameGrabber
+    // to load on M-series Macs (jniavutil/jniavformat etc. are platform-specific).
+    implementation(include("org.bytedeco:javacpp:1.5.12:macosx-arm64"))
+    implementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:macosx-arm64-gpl"))
+
+    // macOS Intel native binaries.
+    implementation(include("org.bytedeco:javacpp:1.5.12:macosx-x86_64"))
+    implementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:macosx-x86_64-gpl"))
+
+    // Linux x64 native binaries.
+    implementation(include("org.bytedeco:javacpp:1.5.12:linux-x86_64"))
+    implementation(include("org.bytedeco:ffmpeg:7.1.1-1.5.12:linux-x86_64-gpl"))
+
+    implementation(include("maven.modrinth:cloth-config:${project.cloth_config_version}"))
+    implementation("maven.modrinth:modmenu:${project.modmenu_version}")
 }
 
 processResources {
@@ -43,10 +59,13 @@ processResources {
 }
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(21)
+    // 26.1 requires Java 25 minimum, both at runtime and for the Gradle JVM.
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
     withSourcesJar()
 }
 
-tasks.named("remapJar") {
-    addNestedDependencies = true
+// Unobfuscated Loom: the plain `jar` task is the shippable artifact, no remapJar.
+tasks.named("jar", Jar) {
+    from("LICENSE")
+    archiveFileName = "${project.archives_base_name}-${project.version}-mc${project.minecraft_version}.jar"
 }

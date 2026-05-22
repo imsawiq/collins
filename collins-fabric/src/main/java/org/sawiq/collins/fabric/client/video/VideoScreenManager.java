@@ -1,12 +1,12 @@
 package org.sawiq.collins.fabric.client.video;
 
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gui.screen.ChatScreen;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.text.MutableText;
-import net.minecraft.text.Style;
-import net.minecraft.text.Text;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.ChatScreen;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.network.chat.Component;
+import net.minecraft.world.phys.Vec3;
 import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.net.CollinsNet;
 import org.sawiq.collins.fabric.client.state.ScreenState;
@@ -34,16 +34,16 @@ public final class VideoScreenManager {
     private static final int GRAY = 0xAAAAAA;
     private static final int YELLOW = 0xFFFF55;
     private static final int RED = 0xFF5555;
-    private static final Text PREFIX = Text.translatable("text.collins.prefix").setStyle(Style.EMPTY.withColor(GREEN));
+    private static final  Component PREFIX = Component.translatable("text.collins.prefix").setStyle(Style.EMPTY.withColor(GREEN));
 
     private static volatile long lastActionbarUpdateMs = 0;
     private static volatile String lastClientWorldKey = "";
 
-    static String currentWorldKey(MinecraftClient client) {
+    static String currentWorldKey(Minecraft client) {
         if (client == null) return "";
         try {
-            if (client.world != null && client.world.getRegistryKey() != null) {
-                String k = client.world.getRegistryKey().getValue().toString();
+            if (client.level != null && client.level.dimension() != null) {
+                String k = client.level.dimension().identifier().toString();
                 return (k == null) ? "" : k;
             }
         } catch (Exception ignored) {
@@ -66,7 +66,7 @@ public final class VideoScreenManager {
         return s.equals("world") || s.equals("world_nether") || s.equals("world_the_end");
     }
 
-    static boolean isCompatibleWithCurrentWorld(ScreenState st, MinecraftClient client) {
+    static boolean isCompatibleWithCurrentWorld(ScreenState st, Minecraft client) {
         if (st == null || client == null) return true;
         String sw = st.world();
         if (sw == null || sw.isBlank()) return true;
@@ -93,18 +93,18 @@ public final class VideoScreenManager {
         return SCREENS.get(name.toLowerCase(Locale.ROOT));
     }
 
-    public static VideoScreen findNearestPlaying(Vec3d playerPos) {
+    public static VideoScreen findNearestPlaying(Vec3 playerPos) {
         return findNearestPlayingInternal(playerPos, false);
     }
 
-    public static VideoScreen findNearestPlayingOrEnded(Vec3d playerPos) {
+    public static VideoScreen findNearestPlayingOrEnded(Vec3 playerPos) {
         return findNearestPlayingInternal(playerPos, true);
     }
 
-    private static VideoScreen findNearestPlayingInternal(Vec3d playerPos, boolean includeEnded) {
+    private static VideoScreen findNearestPlayingInternal(Vec3 playerPos, boolean includeEnded) {
         if (playerPos == null) return null;
 
-        MinecraftClient client = MinecraftClient.getInstance();
+        Minecraft client = Minecraft.getInstance();
         VideoScreen best = null;
         double bestDist2 = Double.MAX_VALUE;
 
@@ -134,11 +134,11 @@ public final class VideoScreenManager {
         return best;
     }
 
-    private static VideoScreen findNearestPlayingInRadius(Vec3d playerPos, int radiusBlocks) {
+    private static VideoScreen findNearestPlayingInRadius(Vec3 playerPos, int radiusBlocks) {
         if (playerPos == null) return null;
         if (radiusBlocks <= 0) return findNearestPlaying(playerPos);
 
-        MinecraftClient client = MinecraftClient.getInstance();
+        Minecraft client = Minecraft.getInstance();
         VideoScreen best = null;
         double bestDist2 = Double.MAX_VALUE;
         double r = (double) radiusBlocks;
@@ -214,63 +214,63 @@ public final class VideoScreenManager {
         }
     }
 
-    private static MutableText buildActionBarText(VideoScreen nearest, long serverNowMs) {
+    private static MutableComponent buildActionBarText(VideoScreen nearest, long serverNowMs) {
         int pct = Math.max(0, nearest.getDownloadPercent());
         long dlMb = Math.max(0L, nearest.getDownloadedMb());
         long totalMb = Math.max(0L, nearest.getDownloadTotalMb());
 
         if (nearest.isDownloadingYtdlp()) {
-            return Text.translatable("text.collins.youtube.installing_progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.youtube.installing_progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         String platform = nearest.getPlatformLabel();
         boolean platformHasRealProgress = totalMb > 0 || pct > 0 || dlMb > 0;
         if (nearest.isDownloadingPlatformVideo() && totalMb > 0) {
-            return Text.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.platform.download.progress_size", platform, pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloadingPlatformVideo() && pct > 0) {
-            return Text.translatable("text.collins.platform.download.progress", platform, pct).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.platform.download.progress", platform, pct).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloadingPlatformVideo() && dlMb > 0) {
-            return Text.translatable("text.collins.platform.download.size", platform, dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.platform.download.size", platform, dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloadingPlatformVideo() && !platformHasRealProgress) {
             if (nearest.hasDownloadProgressReceived()) {
                 // Progress events flowing but values still 0 - show 0%
-                return Text.translatable("text.collins.platform.download.progress", platform, 0).setStyle(Style.EMPTY.withColor(YELLOW));
+                return Component.translatable("text.collins.platform.download.progress", platform, 0).setStyle(Style.EMPTY.withColor(YELLOW));
             }
-            return Text.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isResolvingPlatformVideo()) {
-            return Text.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.platform.preparing", platform).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloading() && totalMb > 0) {
-            return Text.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.video.download.progress_size", pct, dlMb, totalMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloading() && pct > 0) {
-            return Text.translatable("text.collins.video.download.progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.video.download.progress", pct).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloading() && dlMb > 0) {
-            return Text.translatable("text.collins.video.download.size", dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.video.download.size", dlMb).setStyle(Style.EMPTY.withColor(YELLOW));
         }
         if (nearest.isDownloading()) {
-            return Text.translatable("text.collins.video.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
+            return Component.translatable("text.collins.video.preparing").setStyle(Style.EMPTY.withColor(YELLOW));
         }
 
         if (nearest.isLiveStream()) {
-            return Text.translatable("text.collins.video.live", nearest.state().name()).setStyle(Style.EMPTY.withColor(RED));
+            return Component.translatable("text.collins.video.live", nearest.state().name()).setStyle(Style.EMPTY.withColor(RED));
         }
 
         long posMs = nearest.currentPosMsForDisplay(serverNowMs);
         long durMs = nearest.durationMs();
         if (durMs > 0) {
-            return Text.translatable("text.collins.timeline.full", nearest.state().name(), TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
+            return Component.translatable("text.collins.timeline.full", nearest.state().name(), TimeFormatUtil.formatMs(posMs), TimeFormatUtil.formatMs(durMs))
                 .setStyle(Style.EMPTY.withColor(GREEN));
         }
-        return Text.translatable("text.collins.timeline.single", nearest.state().name(), TimeFormatUtil.formatMs(posMs))
+        return Component.translatable("text.collins.timeline.single", nearest.state().name(), TimeFormatUtil.formatMs(posMs))
             .setStyle(Style.EMPTY.withColor(GREEN));
     }
 
-    private static void sendEndedPrompt(PlayerEntity player, VideoScreen nearest) {
+    private static void sendEndedPrompt(Player player, VideoScreen nearest) {
         String screenKey = nearest.state().name() + "_" + nearest.state().url();
         if (!nearest.hasCachedFile() || SHOWN_DELETE_PROMPT.contains(screenKey)) return;
 
@@ -278,18 +278,18 @@ public final class VideoScreenManager {
         pendingDeletePath = nearest.getCachedFilePath();
         long sizeMb = nearest.getCachedFileSizeMb();
 
-        player.sendMessage(PREFIX.copy()
-            .append(Text.translatable("text.collins.video.session_finished_cache", sizeMb).setStyle(Style.EMPTY.withColor(GRAY)))
-            .append(Text.literal("\n"))
-            .append(Text.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
-            .append(Text.translatable("text.collins.video.delete_command_desc").setStyle(Style.EMPTY.withColor(GRAY)))
-            .append(Text.literal("\n"))
-            .append(Text.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
-            .append(Text.translatable("text.collins.video.open_command_desc").setStyle(Style.EMPTY.withColor(GRAY))), false);
+        player.sendSystemMessage(PREFIX.copy()
+            .append(Component.translatable("text.collins.video.session_finished_cache", sizeMb).setStyle(Style.EMPTY.withColor(GRAY)))
+            .append(Component.literal("\n"))
+            .append(Component.literal("  /collins-cache delete").setStyle(Style.EMPTY.withColor(RED)))
+            .append(Component.translatable("text.collins.video.delete_command_desc").setStyle(Style.EMPTY.withColor(GRAY)))
+            .append(Component.literal("\n"))
+            .append(Component.literal("  /collins-cache open").setStyle(Style.EMPTY.withColor(YELLOW)))
+            .append(Component.translatable("text.collins.video.open_command_desc").setStyle(Style.EMPTY.withColor(GRAY))));
     }
 
-    public static void tick(MinecraftClient client) {
-        PlayerEntity p = client.player;
+    public static void tick(Minecraft client) {
+        Player p = client.player;
 
         // Independent watchdog. We cannot rely solely on
         // ClientPlayConnectionEvents.DISCONNECT because some mods
@@ -300,7 +300,7 @@ public final class VideoScreenManager {
         // world (title screen, disconnect, server-switch transition,
         // singleplayer save-and-quit), there is no legitimate reason for
         // any Collins screen to keep playing, so we drop everything.
-        if (p == null || client.world == null) {
+        if (p == null || client.level == null) {
             if (!SCREENS.isEmpty()) {
                 stopAll();
                 lastClientWorldKey = "";
@@ -319,7 +319,7 @@ public final class VideoScreenManager {
             stopAllPlayback();
         }
 
-        Vec3d pos = p.getPos();
+        Vec3 pos = p.position();
         int radius = CollinsNet.HEAR_RADIUS;
         float globalVolume = CollinsNet.GLOBAL_VOLUME;
         long serverNowMs = estimateServerNowMs();
@@ -334,7 +334,7 @@ public final class VideoScreenManager {
         }
 
         CollinsClientConfig cfg = CollinsClientConfig.get();
-        if (cfg.renderVideo && cfg.actionbarTimeline && !(client.currentScreen instanceof ChatScreen)) {
+        if (cfg.renderVideo && cfg.actionbarTimeline && !(client.screen instanceof ChatScreen)) {
             long now = System.currentTimeMillis();
             if (now - lastActionbarUpdateMs >= 500L) {
                 lastActionbarUpdateMs = now;
@@ -343,11 +343,11 @@ public final class VideoScreenManager {
                 if (nearest != null) {
                     if (nearest.isEnded()) {
                         sendEndedPrompt(p, nearest);
-                        p.sendMessage(Text.literal(""), true);
+                        p.sendOverlayMessage(Component.literal(""));
                     } else if (nearest.hasEnded()) {
-                        p.sendMessage(Text.literal(""), true);
+                        p.sendOverlayMessage(Component.literal(""));
                     } else {
-                        p.sendMessage(PREFIX.copy().append(buildActionBarText(nearest, serverNowMs)), true);
+                        p.sendOverlayMessage(PREFIX.copy().append(buildActionBarText(nearest, serverNowMs)));
                     }
                 }
             }

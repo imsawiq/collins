@@ -46,7 +46,7 @@ public final class CollinsNet {
     public static void initClientReceiver() {
         if (DEBUG) System.out.println("[Collins] Client init: registering receiver collins:main");
 
-        ClientPlayNetworking.registerGlobalReceiver(CollinsMainS2CPayload.ID, (payload, context) -> {
+        ClientPlayNetworking.registerGlobalReceiver(CollinsMainS2CPayload.TYPE, (payload, context) -> {
             byte[] bytes = payload.data();
 
             context.client().execute(() -> {
