@@ -1603,6 +1603,8 @@ public final class VideoPlayer {
                 g.setOption("seekable", liveStream ? "0" : "1");
                 g.setOption("multiple_requests", "1");
                 if (liveStream) {
+                    boolean ytLive = url != null && url.toLowerCase(Locale.ROOT).contains("googlevideo.com");
+
                     // Critical: disable Range requests for live HLS segments.
                     // Browsers download full segments with plain GET; YouTube
                     // and Twitch CDNs reply to `Range: bytes=N-` with empty
@@ -1620,21 +1622,37 @@ public final class VideoPlayer {
                     // Playback works (FFmpeg falls back to fresh conn) but
                     // logs are spammed. Turn off keep-alive on googlevideo,
                     // keep it on for everything else.
-                    boolean ytLive = url != null && url.toLowerCase(Locale.ROOT).contains("googlevideo.com");
                     g.setOption("http_persistent", ytLive ? "0" : "1");
-                    // Start 3 segments behind the live edge instead of right
-                    // at it. live_start_index=-1 means "newest segment" which
-                    // gives FFmpeg ZERO buffer - any 100ms network blip causes
-                    // an underrun and visible freeze. -3 (~6-12s of buffered
-                    // content depending on segment length) is what FFmpeg's
-                    // own default HLS player uses and what mpv/vlc default to.
-                    // Latency increases by ~10s, smoothness improves drastically.
-                    g.setOption("live_start_index", "-3");
+
+                    // Live edge buffer. -3 (~6-12 s) is fine for Twitch,
+                    // which is served from a single ttvnw.net edge per
+                    // stream. YouTube live is more jittery: googlevideo
+                    // load-balances every segment across rotating
+                    // sn-XXX.googlevideo.com hosts, each segment closes
+                    // its TCP socket (because http_persistent is off),
+                    // and a single TLS handshake spike can starve the
+                    // decoder long enough for a visible freeze. -5
+                    // (~10-20 s) gives YouTube live enough cushion to
+                    // ride those out cleanly.
+                    g.setOption("live_start_index", ytLive ? "-5" : "-3");
                     // Allow the demuxer to keep more segments in its memory
                     // window. Default is 1000; bumping ensures we don't lose
                     // already-buffered segments when the master playlist
-                    // refreshes.
-                    g.setOption("m3u8_hold_counters", "10");
+                    // refreshes. YouTube live rewrites its m3u8 every few
+                    // seconds and rotates segment URLs more aggressively
+                    // than Twitch, so it benefits from a deeper hold buffer.
+                    g.setOption("m3u8_hold_counters", ytLive ? "20" : "10");
+                    // YouTube live loses a TCP connection per segment
+                    // (no keep-alive) AND has a non-trivial TLS RTT to
+                    // googlevideo. The default ffmpeg input buffer
+                    // (~500 KB / 5 MB depending on build) drains during
+                    // a single mid-stream handshake, the decoder runs
+                    // dry, and we see a visible freeze. Bump to 32 MB
+                    // for YT (~30-60 s of 720p HLS at typical bitrates),
+                    // keep the existing 8 MB elsewhere.
+                    if (ytLive) {
+                        g.setOption("buffer_size", "33554432");
+                    }
                 } else {
                     g.setOption("fflags", "nobuffer");
                 }

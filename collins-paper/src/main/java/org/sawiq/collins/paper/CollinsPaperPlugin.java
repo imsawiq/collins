@@ -371,6 +371,142 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     }
 
     /**
+     * Two-phase playback start used by {@code /collins play} and
+     * {@code /collins resume}.
+     *
+     * <p>Phase 1: tell the player we're validating the URL, push a
+     * `cmd.validating` message after a short grace period (so a
+     * cache-hit probe — instant — does not produce noise). Run
+     * {@link FFprobeUtil#getDurationMs(String)} on the async
+     * scheduler.</p>
+     *
+     * <p>Phase 2: when the probe completes, run a continuation on the
+     * global region scheduler that updates {@link ScreenStore} /
+     * {@link CollinsRuntimeState} and sends the success / failure
+     * message. This keeps every Bukkit-state mutation on a server
+     * thread (Folia-safe).</p>
+     *
+     * <p>If the probe returns 0 ms (yt-dlp / ffprobe both failed) we
+     * refuse the start and tell the player. The URL is now in the
+     * failure cache, so subsequent {@code /collins play} calls hit
+     * the synchronous {@link #checkPlayableUrl(String)} path
+     * instantly without waiting for another probe.</p>
+     *
+     * <p>If the probe returns a positive duration OR yt-dlp marked
+     * the URL as live, we proceed with the start and broadcast a
+     * sync packet to clients.</p>
+     *
+     * <p>Hard timeout: {@code 8 s}. After that we either trust a cached
+     * positive answer or refuse, regardless of whether yt-dlp is still
+     * running in the background. Chat commands are not allowed to
+     * stall the server thread for longer than that.</p>
+     */
+    public void startPlaybackAfterProbe(org.bukkit.entity.Player player, Screen screen, boolean fromZero) {
+        String name = screen.name();
+        String url = screen.mp4Url();
+
+        // If we already have a positive duration cached for this URL,
+        // skip the round-trip and start immediately. This is the common
+        // case after the first /collins play has populated the cache.
+        long cached = FFprobeUtil.getCachedDurationMs(url);
+        boolean knownLive = FFprobeUtil.isKnownLive(url);
+        if (cached > 0 || knownLive) {
+            doStartPlaybackOnServerThread(player, screen, fromZero, "cached probe ok");
+            return;
+        }
+
+        // Tell the player we're working. Use a one-tick delay so a
+        // probe that completes instantly (e.g. cache miss, but the
+        // probe is fast on this URL) does not produce a redundant
+        // "validating" line above the "now playing" line.
+        Bukkit.getAsyncScheduler().runDelayed(this, t -> {
+            if (player.isOnline()) {
+                lang.send(player, "cmd.validating", lang.vars("name", name, "url", url));
+            }
+        }, 800L, java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        // Run the probe asynchronously and dispatch the result back to
+        // the global region scheduler so all store/runtime mutations
+        // happen on a Bukkit thread (Folia-safe).
+        java.util.concurrent.CompletableFuture<Long> probeFuture = FFprobeUtil.getDurationMs(url);
+        java.util.concurrent.CompletableFuture<Long> bounded = probeFuture
+                .completeOnTimeout(0L, 8, java.util.concurrent.TimeUnit.SECONDS);
+
+        bounded.whenComplete((duration, ex) -> Bukkit.getGlobalRegionScheduler().execute(this, () -> {
+            // Re-fetch the screen to pick up any changes the player or
+            // another admin may have made while the probe was running.
+            Screen current = store.get(name);
+            if (current == null) {
+                if (player.isOnline()) {
+                    lang.send(player, "error.screen_not_found", lang.vars("name", name));
+                }
+                return;
+            }
+            if (!java.util.Objects.equals(current.mp4Url(), url)) {
+                // URL changed mid-probe; abort, the new URL needs its own
+                // round of validation.
+                if (player.isOnline()) {
+                    lang.send(player, "cmd.validation_aborted",
+                            lang.vars("name", name, "url", url));
+                }
+                return;
+            }
+
+            boolean live = FFprobeUtil.isKnownLive(url);
+            long durationFromCache = FFprobeUtil.getCachedDurationMs(url);
+            long resolvedDuration = duration != null && duration > 0
+                    ? duration
+                    : durationFromCache;
+
+            if (resolvedDuration <= 0 && !live) {
+                if (player.isOnline()) {
+                    lang.send(player, "error.unplayable_url",
+                            lang.vars("name", name, "url", url));
+                }
+                getLogger().info(player.getName() + " play '" + name
+                        + "' rejected: probe returned no duration for " + url);
+                return;
+            }
+
+            doStartPlaybackOnServerThread(player, current, fromZero, "probe ok");
+        }));
+    }
+
+    private void doStartPlaybackOnServerThread(org.bukkit.entity.Player player, Screen s,
+                                               boolean fromZero, String reason) {
+        if (fromZero) {
+            runtime.restartPlayback(s.name());
+        } else {
+            CollinsRuntimeState.Playback pb = runtime.get(s.name());
+            pb.startEpochMs = System.currentTimeMillis();
+        }
+
+        Screen updated = new Screen(
+                s.name(), s.world(),
+                s.x1(), s.y1(), s.z1(),
+                s.x2(), s.y2(), s.z2(),
+                s.axis(),
+                s.mp4Url(),
+                true,
+                s.loop(),
+                s.volume(),
+                s.youtubeQuality()
+        );
+
+        store.put(updated);
+        store.save();
+        prefetchDuration(updated);
+        messenger.requestBroadcastSync();
+
+        if (player.isOnline()) {
+            String key = fromZero ? "cmd.playing" : "cmd.resumed";
+            lang.send(player, key, lang.vars("name", s.name()));
+        }
+        getLogger().info(player.getName() + " "
+                + (fromZero ? "play '" : "resume '") + s.name() + "' (" + reason + ")");
+    }
+
+    /**
      * Drops bookkeeping entries for a deleted screen so the
      * {@link #lastDurationRequestAtMs} / {@link #lastDurationRequestUrl}
      * maps don't slowly accumulate stale keys across the server's
