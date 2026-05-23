@@ -384,7 +384,8 @@ public final class VideoPlayer {
                 Path dst = dir.resolve(hash + ext);
 
                 long written = 0L;
-                long lastProgressLog = 0L;
+                long lastProgressNs = 0L;
+                long lastProgressBytes = 0L;
                 try (InputStream in = c.getInputStream(); OutputStream out = Files.newOutputStream(tmp)) {
                     boolean ctHtml = false;
                     try {
@@ -422,9 +423,19 @@ public final class VideoPlayer {
                         written += r;
 
                         // Р вЂєР С•Р С–Р С‘РЎР‚РЎС“Р ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р С”Р В°Р В¶Р Т‘РЎвЂ№Р Вµ 10 Р СљР вЂ
-                        long progressMb = written / (10L * 1024L * 1024L);
-                        if (progressMb > lastProgressLog) {
-                            lastProgressLog = progressMb;
+                        // Push a progress update at least once per
+                        // second OR once per 16 MB written, whichever
+                        // comes first. The previous "every 10 MB" gate
+                        // left the HUD stuck on "Preparing..." for
+                        // tens of seconds at a time when downloading a
+                        // multi-gigabyte movie over a slow link, which
+                        // looked like a hard freeze to users.
+                        long nowProgressNs = System.nanoTime();
+                        boolean dueByTime = (nowProgressNs - lastProgressNs) >= 1_000_000_000L;
+                        boolean dueByBytes = (written - lastProgressBytes) >= (16L * 1024L * 1024L);
+                        if (lastProgressNs == 0L || dueByTime || dueByBytes) {
+                            lastProgressNs = nowProgressNs;
+                            lastProgressBytes = written;
                             long writtenMb = written / (1024L * 1024L);
                             long totalMb = declaredLen > 0 ? declaredLen / (1024L * 1024L) : -1;
                             int pct = declaredLen > 0 ? (int) (written * 100L / declaredLen) : -1;
@@ -605,7 +616,7 @@ public final class VideoPlayer {
             });
     private static final long META_TTL_MS = 15L * 60L * 1000L;
 
-    private static final long DISK_CACHE_MAX_BYTES = 4L * 1024L * 1024L * 1024L;
+    private static final long DISK_CACHE_MAX_BYTES = 16L * 1024L * 1024L * 1024L;
     private static final long DISK_CACHE_FAIL_COOLDOWN_MS = 10_000L;
 
     public boolean isRunning() {
@@ -1959,7 +1970,8 @@ public final class VideoPlayer {
                 Path dst = dir.resolve(hash + ext);
 
                 long written = 0L;
-                long lastProgressLog = 0L;
+                long lastProgressNs = 0L;
+                long lastProgressBytes = 0L;
                 try (InputStream in = c.getInputStream(); OutputStream out = Files.newOutputStream(tmp)) {
                     // Р вЂўРЎРѓР В»Р С‘ probe Р Р†Р С‘Р Т‘Р ВµР В» text/html, Р Р…Р С• Р СРЎвЂ№ Р Р†РЎРѓРЎвЂ РЎР‚Р В°Р Р†Р Р…Р С• Р С—РЎвЂ№РЎвЂљР В°Р ВµР СРЎРѓРЎРЏ Р С”РЎРЊРЎв‚¬Р С‘РЎР‚Р С•Р Р†Р В°РЎвЂљРЎРЉ РІР‚вЂќ
                     // Р В·Р В°РЎвЂ°Р С‘РЎвЂљР С‘Р СРЎРѓРЎРЏ Р С•РЎвЂљ РЎРѓР С•РЎвЂ¦РЎР‚Р В°Р Р…Р ВµР Р…Р С‘РЎРЏ HTML-РЎРѓРЎвЂљРЎР‚Р В°Р Р…Р С‘РЎвЂ РЎвЂ№ Р Р† Р С”РЎРЊРЎв‚¬.
@@ -1998,9 +2010,19 @@ public final class VideoPlayer {
                         written += r;
 
                         // Р вЂєР С•Р С–Р С‘РЎР‚РЎС“Р ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р С”Р В°Р В¶Р Т‘РЎвЂ№Р Вµ 10 Р СљР вЂ
-                        long progressMb = written / (10L * 1024L * 1024L);
-                        if (progressMb > lastProgressLog) {
-                            lastProgressLog = progressMb;
+                        // Push a progress update at least once per
+                        // second OR once per 16 MB written, whichever
+                        // comes first. The previous "every 10 MB" gate
+                        // left the HUD stuck on "Preparing..." for
+                        // tens of seconds at a time when downloading a
+                        // multi-gigabyte movie over a slow link, which
+                        // looked like a hard freeze to users.
+                        long nowProgressNs = System.nanoTime();
+                        boolean dueByTime = (nowProgressNs - lastProgressNs) >= 1_000_000_000L;
+                        boolean dueByBytes = (written - lastProgressBytes) >= (16L * 1024L * 1024L);
+                        if (lastProgressNs == 0L || dueByTime || dueByBytes) {
+                            lastProgressNs = nowProgressNs;
+                            lastProgressBytes = written;
                             long writtenMb = written / (1024L * 1024L);
                             long totalMb = declaredLen > 0 ? declaredLen / (1024L * 1024L) : -1;
                             int pct = declaredLen > 0 ? (int) (written * 100L / declaredLen) : -1;

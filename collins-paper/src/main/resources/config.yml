@@ -77,3 +77,17 @@ ffprobe:
   # EN: Timeout in seconds for ffprobe/yt-dlp commands. Default: 30
   # RU: Таймаут в секундах для команд ffprobe/yt-dlp. По умолчанию: 30
   timeout: 30
+
+# EN: Memory watchdog. Once used heap crosses heapHighWatermark
+#     (a fraction of -Xmx) the plugin drops every internal cache it
+#     owns to avoid OOM. The success path is one Runtime.getRuntime()
+#     call per pass, so it does not measurably load the server even on
+#     large public servers. Set heapHighWatermark to 0 to disable.
+# RU: Сторож памяти. Когда использованный heap превышает heapHighWatermark
+#     (доля от -Xmx), плагин сбрасывает все свои внутренние кэши чтобы
+#     не уронить сервер по OOM. В нормальном режиме — один вызов
+#     Runtime.getRuntime() на проход, нагрузки нет даже на крупных
+#     паблик серверах. Поставь heapHighWatermark в 0 чтобы отключить.
+memory:
+  heapHighWatermark: 0.85
+  checkIntervalMs: 10000
