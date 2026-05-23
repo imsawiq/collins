@@ -25,6 +25,22 @@ public final class SelectionVisualizer {
         if (old != null) old.cancel(); // отмена повторяющейся задачи (Folia-safe)
     }
 
+    /**
+     * Cancel every active selection-frame task. Called from the plugin's
+     * {@code onDisable} so the JVM is not left holding ScheduledTasks
+     * across a plugin reload (which would NPE on the next tick when they
+     * try to deref the now-disabled plugin instance).
+     */
+    public static void stopAll() {
+        for (var e : TASKS.entrySet()) {
+            try {
+                e.getValue().cancel();
+            } catch (Exception ignored) {
+            }
+        }
+        TASKS.clear();
+    }
+
     public static void showFrame(JavaPlugin plugin, Player player,
                                  int x1, int y1, int z1,
                                  int x2, int y2, int z2,
