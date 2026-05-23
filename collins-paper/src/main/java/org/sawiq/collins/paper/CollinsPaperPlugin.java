@@ -35,6 +35,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private SelectionService selection;
     private CollinsRuntimeState runtime;
     private Lang lang;
+    private CollinsCommand collinsCommand;
     private final Set<UUID> moddedPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, String> moddedPlayerVersions = new ConcurrentHashMap<>();
     private final Set<UUID> outdatedModdedPlayers = ConcurrentHashMap.newKeySet();
@@ -68,11 +69,11 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
         messenger = new CollinsMessenger(this, store, runtime, moddedPlayers, outdatedModdedPlayers);
 
-        var cmd = new CollinsCommand(this, store, playlistStore, messenger, selection, runtime, lang);
+        collinsCommand = new CollinsCommand(this, store, playlistStore, messenger, selection, runtime, lang);
         var pluginCmd = getCommand("collins");
         if (pluginCmd != null) {
-            pluginCmd.setExecutor(cmd);
-            pluginCmd.setTabCompleter(cmd);
+            pluginCmd.setExecutor(collinsCommand);
+            pluginCmd.setTabCompleter(collinsCommand);
         } else {
             getLogger().severe("Command /collins not found in plugin.yml");
         }
@@ -105,6 +106,18 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         if (syncBroadcastIntervalTicks > 0) {
             Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, t -> broadcastActiveSync(), syncBroadcastIntervalTicks, syncBroadcastIntervalTicks);
         }
+
+        // Periodic memory hygiene. Without this the FFprobe duration /
+        // failure caches and the per-player command rate-limit map grow
+        // unboundedly on long-running servers (every fresh
+        // `/collins seturl` adds one entry, and TTL eviction is lazy on
+        // read). Runs every minute, off the main thread so the cleanup
+        // sweep never blocks gameplay.
+        long pruneIntervalTicks = 20L * 60L;
+        Bukkit.getAsyncScheduler().runAtFixedRate(this, t -> {
+            FFprobeUtil.pruneStaleEntries();
+            pruneTransientPlayerState();
+        }, pruneIntervalTicks * 50L, pruneIntervalTicks * 50L, java.util.concurrent.TimeUnit.MILLISECONDS);
 
         for (Screen screen : store.all()) {
             prefetchDuration(screen);
@@ -267,6 +280,23 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         lastDurationRequestUrl.remove(key);
     }
 
+    /**
+     * Drops bookkeeping entries that pertain to players who are no longer
+     * online. Runs from the periodic prune task so even if {@code onQuit}
+     * is missed (server crashed mid-disconnect, the listener throws on a
+     * bad plugin state, etc.) we still bound the size of these maps.
+     */
+    private void pruneTransientPlayerState() {
+        java.util.Set<UUID> online = new java.util.HashSet<>();
+        for (var p : Bukkit.getOnlinePlayers()) {
+            online.add(p.getUniqueId());
+        }
+        notifiedAdmins.removeIf(uuid -> !online.contains(uuid));
+        if (collinsCommand != null) {
+            collinsCommand.forgetMissingPlayers(online);
+        }
+    }
+
     private void requestDurationIfNeeded(Screen screen) {
         if (screen == null) {
             return;
@@ -390,6 +420,17 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         UUID uuid = e.getPlayer().getUniqueId();
         moddedPlayerVersions.remove(uuid);
         outdatedModdedPlayers.remove(uuid);
+        // The "you have a Modrinth update" notification is shown at most
+        // once per server lifetime per player; the bookkeeping entry is
+        // only useful while the player is online, so drop it on quit
+        // instead of letting it accumulate forever.
+        notifiedAdmins.remove(uuid);
+        // Per-player command rate limit timestamps are equally pointless
+        // once the player is gone; without this `lastCommandAtMs` would
+        // keep one entry per player who ever ran `/collins ...`.
+        if (collinsCommand != null) {
+            collinsCommand.forgetPlayer(uuid);
+        }
         if (moddedPlayers.remove(uuid)) {
             messenger.requestBroadcastSync();
         }

@@ -9,6 +9,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.ChatFormatting;
 import net.minecraft.resources.Identifier;
+import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 import org.sawiq.collins.fabric.client.util.TimeFormatUtil;
 import org.sawiq.collins.fabric.client.video.VideoScreen;
 import org.sawiq.collins.fabric.client.video.VideoScreenManager;
@@ -59,6 +60,14 @@ public final class VideoHudOverlay {
         // with the chat input. The previous 1.21.x impl used the same
         // gate against ChatScreen.
         if (client.screen instanceof ChatScreen) return;
+
+        // Avoid drawing the timeline twice. VideoScreenManager already
+        // pushes timeline / download progress to the actionbar via
+        // sendOverlayMessage when actionbarTimeline is enabled, and the
+        // vanilla actionbar renders right above the hotbar at the same
+        // y as our HUD layer. Only draw here when the user has turned
+        // the actionbar timeline off.
+        if (CollinsClientConfig.get().actionbarTimeline) return;
 
         VideoScreen screen = VideoScreenManager.findNearestPlayingOrEnded(client.player.position());
         if (screen == null) return;

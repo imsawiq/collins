@@ -1,6 +1,5 @@
 package org.sawiq.collins.fabric.client.video;
 
-import com.mojang.blaze3d.platform.NativeImage;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.blaze3d.vertex.VertexConsumer;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderContext;
@@ -10,7 +9,6 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.MultiBufferSource;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.rendertype.RenderTypes;
-import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.resources.Identifier;
 import net.minecraft.util.Brightness;
@@ -22,15 +20,6 @@ import org.sawiq.collins.fabric.client.state.ScreenState;
 public final class VideoScreenRenderer {
 
     private static final double EPS = 0.01; // насколько “над блоком” рисуем
-
-    /**
-     * Lazy-initialised 1×1 dark grey texture used as a placeholder for
-     * screens that do not have a video texture yet (still resolving,
-     * ffmpeg failed, etc). Without this the screen plane was invisible
-     * and players could not tell whether {@code /collins create} actually
-     * produced a screen and where it ended up.
-     */
-    private static Identifier placeholderTexId;
 
     private VideoScreenRenderer() {}
 
@@ -70,56 +59,19 @@ public final class VideoScreenRenderer {
             ScreenState st = screen.state();
             if (!VideoScreenManager.isCompatibleWithCurrentWorld(st, client)) continue;
             screen.renderPlayback();
-            // Рисуем плоскость даже без текстуры — пользователь должен видеть,
-            // что экран физически создан и где он стоит. Без видео заполняем
-            // тёмным фоном; с видео — натягиваем динамическую текстуру.
+            // Render the screen only if a video texture is currently
+            // bound. Drawing a flat placeholder when no video is playing
+            // (the original 26.1 port did this) leaves a stale dark
+            // panel hanging in the world long after `/collins stop`,
+            // which players reasonably read as "the screen never goes
+            // away even when nothing is playing".
             if (screen.hasTexture()) {
                 drawScreen(entry, consumers, cam, st, screen.textureId());
-            } else {
-                drawScreenPlaceholder(entry, consumers, cam, st);
             }
         }
 
         matrices.popPose();
         consumers.endBatch();
-    }
-
-    private static void drawScreenPlaceholder(PoseStack.Pose entry,
-                                              MultiBufferSource consumers,
-                                              Vec3 cam,
-                                              ScreenState s) {
-        Identifier placeholder = placeholderTextureId();
-        if (placeholder == null) return;
-        drawScreen(entry, consumers, cam, s, placeholder);
-    }
-
-    /**
-     * Returns the lazy-initialised 1×1 dark-grey placeholder texture id.
-     * Returns {@code null} on the very first frame after launch when the
-     * texture manager is not yet ready - the caller simply skips drawing
-     * that frame and tries again next tick.
-     */
-    private static Identifier placeholderTextureId() {
-        if (placeholderTexId != null) return placeholderTexId;
-        Minecraft mc = Minecraft.getInstance();
-        if (mc == null || mc.getTextureManager() == null) return null;
-        Identifier id = Identifier.fromNamespaceAndPath("collins", "screen/placeholder");
-        try {
-            DynamicTexture tex = new DynamicTexture("collins:placeholder", 1, 1, true);
-            NativeImage img = tex.getPixels();
-            if (img != null) {
-                // Opaque dark grey so empty screens are clearly visible
-                // against any background but do not steal focus from
-                // playing screens.
-                img.fillRect(0, 0, 1, 1, 0xFF202020);
-            }
-            tex.upload();
-            mc.getTextureManager().register(id, tex);
-            placeholderTexId = id;
-            return placeholderTexId;
-        } catch (Exception e) {
-            return null;
-        }
     }
 
     private static void drawScreen(PoseStack.Pose entry,
