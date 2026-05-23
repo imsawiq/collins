@@ -237,6 +237,25 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             if (!screen.playing()) continue;
             if (screen.mp4Url() == null || screen.mp4Url().isBlank()) continue;
 
+            // Watchdog: a URL we already know yt-dlp / ffprobe will
+            // never resolve (PO token gate, "Video unavailable",
+            // private/age-restricted, "Failed to extract", etc.) is not
+            // worth keeping a server-side timeline for. The clients
+            // just spin on "Preparing..." indefinitely while the server
+            // ticks forward, which is exactly the symptom users see
+            // when /collins seturl points at a dead link. Stop the
+            // playback so /collins list reflects reality and the
+            // server stops broadcasting an empty-track timeline.
+            if (FFprobeUtil.isKnownPermanentlyDead(screen.mp4Url())) {
+                getLogger().info("Auto-stopping screen '" + screen.name()
+                        + "': URL is in the permanent-failure cache (yt-dlp/ffprobe gave up).");
+                var updated = screen.withPlaying(false);
+                store.put(updated);
+                runtime.stopPlayback(screen.name());
+                needBroadcast = true;
+                continue;
+            }
+
             long duration = runtime.getDurationMs(screen.name());
 
             if (duration <= 0) {
@@ -299,6 +318,56 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
     public void prefetchDuration(String screenName, String url) {
         requestDurationIfNeeded(screenName, url);
+    }
+
+    /**
+     * Pre-flight check for {@code /collins play} and friends. Returns
+     * {@code null} if the URL is something we are willing to start a
+     * playback timeline for, or a translation key suitable for
+     * {@code lang.send(...)} explaining why we refuse.
+     *
+     * <p>Refusal is intentionally narrow:</p>
+     * <ul>
+     *   <li>{@code null} / blank — there is literally no URL set.</li>
+     *   <li>Scheme that ffmpeg cannot speak ({@code file://},
+     *       {@code gopher://}, raw filesystem path, leading dash —
+     *       SSRF / arg-injection vectors).</li>
+     *   <li>The URL is in {@code FFprobeUtil}'s permanent-failure cache
+     *       — yt-dlp / ffprobe both already gave up with an
+     *       unrecoverable marker (PO token gate, "Video unavailable",
+     *       private/age-restricted, "Failed to extract any player
+     *       response", etc.). Letting the player issue {@code play}
+     *       again on the same dead link would just spin its HUD on
+     *       "preparing" while the server timeline ticks forward
+     *       feeding nothing — exactly the symptom users see today.</li>
+     * </ul>
+     *
+     * <p>Transient failures, never-probed URLs, and any URL that
+     * resolved to a non-zero duration last time are all allowed
+     * through. We do NOT do a synchronous yt-dlp here: we never want
+     * a chat command to block on a 30 s subprocess.</p>
+     */
+    public String checkPlayableUrl(String url) {
+        if (url == null || url.isBlank()) {
+            return "error.no_url";
+        }
+        String trimmed = url.trim();
+        if (trimmed.charAt(0) == '-') {
+            return "error.bad_url";
+        }
+        String lower = trimmed.toLowerCase(java.util.Locale.ROOT);
+        boolean schemeOk = lower.startsWith("http://")
+                || lower.startsWith("https://")
+                || lower.startsWith("rtmp://")
+                || lower.startsWith("rtmps://")
+                || lower.startsWith("rtsp://");
+        if (!schemeOk) {
+            return "error.bad_url";
+        }
+        if (FFprobeUtil.isKnownPermanentlyDead(trimmed)) {
+            return "error.dead_url";
+        }
+        return null;
     }
 
     /**

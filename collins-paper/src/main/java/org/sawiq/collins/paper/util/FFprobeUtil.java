@@ -92,12 +92,18 @@ public class FFprobeUtil {
             "account associated with this video has been terminated",
     };
 
-    private static final Map<String, Long> FAILURE_CACHE = new ConcurrentHashMap<>();
-    // Stored value is the absolute expiry timestamp in epoch ms, NOT the
-    // time the failure was recorded. Different errors live in the cache
-    // for different lengths of time (regular network blip = 10 min,
-    // permanent platform error = 6 h), so encoding the deadline directly
-    // is simpler than carrying TTL separately.
+    /**
+     * Negative cache entry. {@code expiresAtMs} is the absolute deadline
+     * after which we treat the URL as probe-able again; {@code permanent}
+     * lets the caller know whether the upstream rejection looked
+     * unrecoverable (so {@code /collins play} can refuse the command up
+     * front) or just transient (so the regular checkVideoEndings loop
+     * can keep watching for it to come back).
+     */
+    private record FailureEntry(long expiresAtMs, boolean permanent) {
+    }
+
+    private static final Map<String, FailureEntry> FAILURE_CACHE = new ConcurrentHashMap<>();
 
     /**
      * Singleflight registry: when several callers ask for the same URL
@@ -204,7 +210,7 @@ public class FFprobeUtil {
                         evictOldestFailureEntries(FAILURE_CACHE.size() - CACHE_MAX_ENTRIES + 1);
                     }
                     long ttl = permanent ? PERMANENT_FAILURE_TTL_MS : FAILURE_CACHE_TTL_MS;
-                    FAILURE_CACHE.put(url, System.currentTimeMillis() + ttl);
+                    FAILURE_CACHE.put(url, new FailureEntry(System.currentTimeMillis() + ttl, permanent));
                 }
                 return 0L;
             }
@@ -264,13 +270,37 @@ public class FFprobeUtil {
 
     private static boolean isFailureCached(String url) {
         if (url == null || url.isBlank()) return false;
-        Long expiresAtMs = FAILURE_CACHE.get(url);
-        if (expiresAtMs == null) return false;
-        if (System.currentTimeMillis() >= expiresAtMs) {
+        FailureEntry entry = FAILURE_CACHE.get(url);
+        if (entry == null) return false;
+        if (System.currentTimeMillis() >= entry.expiresAtMs()) {
             FAILURE_CACHE.remove(url);
             return false;
         }
         return true;
+    }
+
+    /**
+     * Public probe: is this URL currently flagged as a permanently dead
+     * link (yt-dlp / ffprobe both gave up with an unrecoverable error
+     * marker like "Sign in to confirm" / "Video unavailable" /
+     * "Failed to extract any player response")?
+     *
+     * <p>Used by the {@code /collins play} preflight check so we never
+     * even start a server-side timeline for a URL we know we can't
+     * play, instead of letting it spin forever in "preparing" on the
+     * client side. Returns {@code false} for transient failures and
+     * for URLs that have not yet been probed at all — preflight stays
+     * optimistic except where we have hard evidence.</p>
+     */
+    public static boolean isKnownPermanentlyDead(String url) {
+        if (url == null || url.isBlank()) return false;
+        FailureEntry entry = FAILURE_CACHE.get(url);
+        if (entry == null) return false;
+        if (System.currentTimeMillis() >= entry.expiresAtMs()) {
+            FAILURE_CACHE.remove(url);
+            return false;
+        }
+        return entry.permanent();
     }
 
     public static long getCachedDurationMs(String url) {
@@ -312,9 +342,9 @@ public class FFprobeUtil {
     public static void pruneStaleEntries() {
         long now = System.currentTimeMillis();
         DURATION_CACHE.entrySet().removeIf(e -> (now - e.getValue().cachedAtMs()) > CACHE_TTL_MS);
-        // FAILURE_CACHE values are absolute expiry timestamps now, so
-        // drop anything whose deadline is in the past.
-        FAILURE_CACHE.entrySet().removeIf(e -> now >= e.getValue());
+        // FAILURE_CACHE values are FailureEntry records with an absolute
+        // expiry timestamp; drop anything whose deadline is in the past.
+        FAILURE_CACHE.entrySet().removeIf(e -> now >= e.getValue().expiresAtMs());
     }
 
     /**
@@ -383,7 +413,8 @@ public class FFprobeUtil {
     private static void evictOldestFailureEntries(int n) {
         if (n <= 0) return;
         FAILURE_CACHE.entrySet().stream()
-                .sorted(java.util.Map.Entry.comparingByValue())
+                .sorted(java.util.Map.Entry.<String, FailureEntry>comparingByValue(
+                        java.util.Comparator.comparingLong(FailureEntry::expiresAtMs)))
                 .limit(n)
                 .map(java.util.Map.Entry::getKey)
                 .toList()
