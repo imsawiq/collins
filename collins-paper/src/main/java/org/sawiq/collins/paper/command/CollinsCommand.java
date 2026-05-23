@@ -227,6 +227,17 @@ public final class CollinsCommand implements TabExecutor {
                 Screen s = store.get(name);
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
 
+                // Server-side preflight: refuse `play` for URLs we
+                // already know we cannot resolve. Without this the
+                // server starts a timeline ticking forward against an
+                // empty playback while every client spins on
+                // "Preparing..." indefinitely.
+                String preflight = plugin.checkPlayableUrl(s.mp4Url());
+                if (preflight != null) {
+                    lang.send(p, preflight, lang.vars("name", name, "url", s.mp4Url() == null ? "" : s.mp4Url()));
+                    return true;
+                }
+
                 // play = старт с нуля
                 runtime.restartPlayback(s.name());
 
@@ -328,6 +339,12 @@ public final class CollinsCommand implements TabExecutor {
 
                 Screen s = store.get(name);
                 if (s == null) { lang.send(p, "error.screen_not_found", lang.vars("name", name)); return true; }
+
+                String preflight = plugin.checkPlayableUrl(s.mp4Url());
+                if (preflight != null) {
+                    lang.send(p, preflight, lang.vars("name", name, "url", s.mp4Url() == null ? "" : s.mp4Url()));
+                    return true;
+                }
 
                 CollinsRuntimeState.Playback pb = runtime.get(s.name());
                 pb.startEpochMs = System.currentTimeMillis();

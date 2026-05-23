@@ -10,6 +10,9 @@ error.selection_invalid: "{prefix} &cВыделение должно быть п
 error.bad_number: "{prefix} &cНеверное число."
 error.invalid_screen_name: "{prefix} &cНеверное имя экрана: &f{name}"
 error.invalid_url: "{prefix} &cНеверный или запрещённый URL."
+error.no_url: "{prefix} &cУ экрана ещё не задан URL. Сначала используй &f/collins seturl {name} <url>&c."
+error.bad_url: "{prefix} &cСхема URL не воспроизводима. Используй http(s)/rtmp(s)/rtsp."
+error.dead_url: "{prefix} &cЭта ссылка помечена как мёртвая (приват, возраст, удалено, требует входа). Сервер отказывает в запуске. Поменяй URL через &f/collins seturl&c."
 error.rate_limited: "{prefix} &cСлишком быстро. Повтори через &f{ms}мс&c."
 error.seek_too_large: "{prefix} &cСлишком большая перемотка. Макс: &f{max}с"
 
