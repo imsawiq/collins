@@ -313,6 +313,23 @@ public class FFprobeUtil {
     }
 
     /**
+     * Drops every cached duration / failure record. Called by the host
+     * plugin's memory watchdog when used heap crosses the high-water
+     * mark; the trade-off is a brief spike in yt-dlp/ffprobe runs for
+     * actively-playing screens (next call to
+     * {@link #getDurationMs(String)} just re-probes), versus the JVM
+     * dying under unbounded cache growth.
+     *
+     * <p>Does not cancel in-flight probes — those finish on their own
+     * threads and write back into the (now empty) cache. That is fine:
+     * the cache is allowed to refill from a clean slate.</p>
+     */
+    public static void emergencyClear() {
+        DURATION_CACHE.clear();
+        FAILURE_CACHE.clear();
+    }
+
+    /**
      * Hard-cap eviction. Called when the cache hits {@link #CACHE_MAX_ENTRIES}.
      * Picks the oldest {@code n} entries by {@code cachedAtMs} and drops
      * them. We sort instead of using {@code LinkedHashMap} access-order

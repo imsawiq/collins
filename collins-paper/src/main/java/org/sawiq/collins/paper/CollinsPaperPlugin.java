@@ -43,6 +43,15 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private final Map<String, String> lastDurationRequestUrl = new ConcurrentHashMap<>();
 
     /**
+     * Flag toggled by the memory watchdog when used heap crosses the
+     * high-water mark. Used to throttle the warning log so we don't
+     * spam every 10 s while heap stays elevated, and to skip the next
+     * cache rebuild attempt until heap recovers.
+     */
+    private volatile boolean memoryWatchdogTripped = false;
+    private volatile long lastMemoryWatchdogLogAtMs = 0L;
+
+    /**
      * One-time Modrinth version probe. Result is reported to OP players on
      * join (each admin sees the message at most once per server lifetime,
      * tracked by {@link #notifiedAdmins}).
@@ -118,6 +127,21 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             FFprobeUtil.pruneStaleEntries();
             pruneTransientPlayerState();
         }, pruneIntervalTicks * 50L, pruneIntervalTicks * 50L, java.util.concurrent.TimeUnit.MILLISECONDS);
+
+        // Memory watchdog: every 10 seconds, if used heap crosses the
+        // configured high-water mark we drop ALL FFprobe caches and any
+        // per-player bookkeeping that does not point at an online player.
+        // This is the safety net for "the server is starting to thrash" —
+        // we'd rather lose a few cached durations (they get re-probed on
+        // demand) than OOM the JVM. Runs on the async scheduler with a
+        // tiny tick budget (a single Runtime.getRuntime() call per pass
+        // when below threshold) so it does not measurably load the box.
+        double heapHighWatermark = Math.max(0.50, Math.min(0.98,
+                getConfig().getDouble("memory.heapHighWatermark", 0.85)));
+        long memCheckIntervalMs = Math.max(1_000L,
+                getConfig().getLong("memory.checkIntervalMs", 10_000L));
+        Bukkit.getAsyncScheduler().runAtFixedRate(this, t -> runMemoryWatchdog(heapHighWatermark),
+                memCheckIntervalMs, memCheckIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
 
         for (Screen screen : store.all()) {
             prefetchDuration(screen);
@@ -295,6 +319,72 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         if (collinsCommand != null) {
             collinsCommand.forgetMissingPlayers(online);
         }
+    }
+
+    /**
+     * Memory watchdog: when used heap crosses {@code highWatermark}
+     * (a fraction in {@code (0,1)} of {@code Runtime.maxMemory()}) we
+     * aggressively drop every cache the plugin owns. The duration cache
+     * gets rebuilt on demand the next time {@code checkVideoEndings}
+     * needs it, so the worst case is a brief spike in yt-dlp/ffprobe
+     * subprocesses for active screens; the alternative is the JVM
+     * OOMing under the plugin's caches, which on a public server would
+     * take everyone down with it.
+     *
+     * <p>Cheap to call: the success path is a single
+     * {@code Runtime.getRuntime()} read and an {@code if}. We only
+     * touch caches when we actually trip.</p>
+     *
+     * <p>Hysteresis: once tripped we wait until heap drops back below
+     * {@code highWatermark - 0.10} before re-arming, so a heap that
+     * lingers near the threshold does not produce a clear/log every
+     * 10 seconds.</p>
+     */
+    private void runMemoryWatchdog(double highWatermark) {
+        Runtime rt = Runtime.getRuntime();
+        long max = rt.maxMemory();
+        if (max <= 0 || max == Long.MAX_VALUE) {
+            // -Xmx unbounded: nothing meaningful to compare against.
+            return;
+        }
+        long used = rt.totalMemory() - rt.freeMemory();
+        double usedFraction = (double) used / (double) max;
+
+        if (memoryWatchdogTripped) {
+            // Re-arm only after a 10 % drop below the trip line.
+            if (usedFraction < (highWatermark - 0.10)) {
+                memoryWatchdogTripped = false;
+                getLogger().info(String.format(
+                        "Memory pressure cleared: heap at %.0f%% (was above %.0f%%). Caches will repopulate on demand.",
+                        usedFraction * 100.0, highWatermark * 100.0));
+            }
+            return;
+        }
+
+        if (usedFraction < highWatermark) return;
+
+        memoryWatchdogTripped = true;
+        long now = System.currentTimeMillis();
+        // Throttle the warning to at most once per 10 minutes even if
+        // the watchdog keeps tripping.
+        if (now - lastMemoryWatchdogLogAtMs > 10L * 60L * 1000L) {
+            lastMemoryWatchdogLogAtMs = now;
+            getLogger().warning(String.format(
+                    "Memory pressure: heap at %.0f%% (>= %.0f%%); dropping Collins caches to avoid OOM.",
+                    usedFraction * 100.0, highWatermark * 100.0));
+        }
+
+        // Cheap, side-effect-only operations. None of these touch
+        // Bukkit world state, so it's safe to run from the async
+        // scheduler.
+        FFprobeUtil.emergencyClear();
+        lastDurationRequestAtMs.clear();
+        lastDurationRequestUrl.clear();
+        // Don't touch moddedPlayers / outdatedModdedPlayers — those
+        // are the wire-protocol source of truth and re-deriving them
+        // costs more than they weigh. notifiedAdmins is rebuilt
+        // on next join attempt anyway.
+        notifiedAdmins.clear();
     }
 
     private void requestDurationIfNeeded(Screen screen) {
