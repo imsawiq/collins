@@ -34,6 +34,16 @@ public class FFprobeUtil {
     private static final Map<String, CachedDuration> DURATION_CACHE = new ConcurrentHashMap<>();
 
     /**
+     * Hard upper bound on the duration cache. The TTL-based eviction in
+     * {@link #getCached} only fires when the same URL is asked for again
+     * after expiry, so on a server where users keep queuing fresh links
+     * (each {@code /collins seturl} adds an entry) the map would grow
+     * without bound. Evicting eagerly when we cross this threshold keeps
+     * the resident set predictable across long uptimes.
+     */
+    private static final int CACHE_MAX_ENTRIES = 4_096;
+
+    /**
      * Negative cache for URLs whose duration cannot be probed (yt-dlp/
      * ffprobe both fail). Stored separately from {@link #DURATION_CACHE}
      * so we never falsely mark a finite-length video as a live stream
@@ -95,6 +105,9 @@ public class FFprobeUtil {
             try {
                 ProbeResult result = isYtDlpUrl(url) ? probeYtDlpWithFallback(url) : getDurationViaFFprobe(url);
                 if (url != null && !url.isBlank()) {
+                    if (DURATION_CACHE.size() >= CACHE_MAX_ENTRIES) {
+                        evictOldestEntries(DURATION_CACHE.size() - CACHE_MAX_ENTRIES + 1);
+                    }
                     DURATION_CACHE.put(url, new CachedDuration(result.durationMs(), result.live(), System.currentTimeMillis()));
                     FAILURE_CACHE.remove(url);
                 }
@@ -108,6 +121,9 @@ public class FFprobeUtil {
                 // because doing the latter would make isVideoEnded() return
                 // false forever and pin screen.playing()=true.
                 if (url != null && !url.isBlank()) {
+                    if (FAILURE_CACHE.size() >= CACHE_MAX_ENTRIES) {
+                        evictOldestFailureEntries(FAILURE_CACHE.size() - CACHE_MAX_ENTRIES + 1);
+                    }
                     FAILURE_CACHE.put(url, System.currentTimeMillis());
                 }
                 return 0L;
@@ -175,6 +191,48 @@ public class FFprobeUtil {
             return null;
         }
         return cached;
+    }
+
+    /**
+     * Drops every stale entry from both the duration and failure caches.
+     * Lazy-eviction in {@link #getCached} only fires when the same URL
+     * is asked for again, so on a server where every {@code /collins
+     * seturl} adds a fresh URL the maps would otherwise keep growing
+     * until heap exhaustion. Call this on a fixed schedule (e.g. once a
+     * minute) from the plugin to keep the resident set bounded.
+     */
+    public static void pruneStaleEntries() {
+        long now = System.currentTimeMillis();
+        DURATION_CACHE.entrySet().removeIf(e -> (now - e.getValue().cachedAtMs()) > CACHE_TTL_MS);
+        FAILURE_CACHE.entrySet().removeIf(e -> (now - e.getValue()) > FAILURE_CACHE_TTL_MS);
+    }
+
+    /**
+     * Hard-cap eviction. Called when the cache hits {@link #CACHE_MAX_ENTRIES}.
+     * Picks the oldest {@code n} entries by {@code cachedAtMs} and drops
+     * them. We sort instead of using {@code LinkedHashMap} access-order
+     * because {@link ConcurrentHashMap} does not preserve insertion order
+     * and a synchronized LinkedHashMap would serialize every probe call.
+     */
+    private static void evictOldestEntries(int n) {
+        if (n <= 0) return;
+        DURATION_CACHE.entrySet().stream()
+                .sorted(java.util.Map.Entry.comparingByValue(
+                        java.util.Comparator.comparingLong(CachedDuration::cachedAtMs)))
+                .limit(n)
+                .map(java.util.Map.Entry::getKey)
+                .toList()
+                .forEach(DURATION_CACHE::remove);
+    }
+
+    private static void evictOldestFailureEntries(int n) {
+        if (n <= 0) return;
+        FAILURE_CACHE.entrySet().stream()
+                .sorted(java.util.Map.Entry.comparingByValue())
+                .limit(n)
+                .map(java.util.Map.Entry::getKey)
+                .toList()
+                .forEach(FAILURE_CACHE::remove);
     }
 
     private static boolean isYtDlpUrl(String url) {
