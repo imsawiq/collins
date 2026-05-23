@@ -40,8 +40,13 @@ public class FFprobeUtil {
      * (each {@code /collins seturl} adds an entry) the map would grow
      * without bound. Evicting eagerly when we cross this threshold keeps
      * the resident set predictable across long uptimes.
+     *
+     * <p>2048 cached durations at ~250 B per entry (URL string + the
+     * record itself + ConcurrentHashMap overhead) is roughly 0.5 MB of
+     * heap — well under the noise floor on any real server, even one
+     * cycling through thousands of unique links a day.</p>
      */
-    private static final int CACHE_MAX_ENTRIES = 4_096;
+    private static final int CACHE_MAX_ENTRIES = 2_048;
 
     /**
      * Negative cache for URLs whose duration cannot be probed (yt-dlp/
@@ -327,6 +332,34 @@ public class FFprobeUtil {
     public static void emergencyClear() {
         DURATION_CACHE.clear();
         FAILURE_CACHE.clear();
+    }
+
+    /**
+     * Approximate heap footprint of the duration / failure caches in
+     * bytes. Used by the host plugin's memory watchdog to decide whether
+     * dropping our caches would actually move the needle: if global
+     * heap is high but the bulk of it is owned by some other plugin,
+     * clearing our 50 KB of cached durations would just suppress an
+     * unrelated symptom while costing us a yt-dlp re-probe storm.
+     *
+     * <p>Estimation uses a per-entry cost (URL length + a fixed
+     * record/overhead constant). Order-of-magnitude correct; we are
+     * not trying to match a real heap profiler.</p>
+     */
+    public static long estimatedFootprintBytes() {
+        // ~80 B for ConcurrentHashMap.Node + Long key, ~64 B for the
+        // CachedDuration record, plus 2 chars per URL char. Round up
+        // to 200 B fixed + 2 * URL length to be conservative.
+        long total = 0L;
+        for (var e : DURATION_CACHE.entrySet()) {
+            String k = e.getKey();
+            total += 200L + (k != null ? 2L * k.length() : 0L);
+        }
+        for (var e : FAILURE_CACHE.entrySet()) {
+            String k = e.getKey();
+            total += 120L + (k != null ? 2L * k.length() : 0L);
+        }
+        return total;
     }
 
     /**

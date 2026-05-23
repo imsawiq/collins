@@ -78,16 +78,42 @@ ffprobe:
   # RU: Таймаут в секундах для команд ffprobe/yt-dlp. По умолчанию: 30
   timeout: 30
 
-# EN: Memory watchdog. Once used heap crosses heapHighWatermark
-#     (a fraction of -Xmx) the plugin drops every internal cache it
-#     owns to avoid OOM. The success path is one Runtime.getRuntime()
-#     call per pass, so it does not measurably load the server even on
-#     large public servers. Set heapHighWatermark to 0 to disable.
-# RU: Сторож памяти. Когда использованный heap превышает heapHighWatermark
-#     (доля от -Xmx), плагин сбрасывает все свои внутренние кэши чтобы
-#     не уронить сервер по OOM. В нормальном режиме — один вызов
-#     Runtime.getRuntime() на проход, нагрузки нет даже на крупных
-#     паблик серверах. Поставь heapHighWatermark в 0 чтобы отключить.
+# EN: Memory watchdog (DISABLED by default).
+#     The primary defence against runaway memory is a hard-cap on the
+#     plugin's own caches (FFprobe duration / failure caches; per-player
+#     command rate-limit map). Those keep our footprint well under
+#     1 MB regardless of server uptime, so for almost every server you
+#     do NOT need this watchdog.
+#
+#     If you DO opt in by raising heapHighWatermark to a value in
+#     [0.50, 0.98], the watchdog runs every checkIntervalMs and on
+#     trip clears Collins' internal caches. It WILL NOT trip just
+#     because some other plugin is eating heap: it also requires that
+#     Collins itself owns at least minOwnedHeapBytes (default 10 MB).
+#     Otherwise an unrelated plugin filling the heap would silently
+#     dump our cached durations and trigger a yt-dlp re-probe storm
+#     for no benefit.
+#
+#     Cost when enabled: one Runtime.getRuntime() read per pass while
+#     below the watermark; cache scans only when over.
+# RU: Сторож памяти (ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН).
+#     Основная защита от утечек — жёсткие лимиты на собственные кэши
+#     плагина (FFprobe duration / failure кэши; rate-limit команд по
+#     игрокам). Они держат наш футпринт меньше 1 МБ независимо от
+#     аптайма, поэтому почти на любом сервере watchdog не нужен.
+#
+#     Если хочешь включить — поставь heapHighWatermark в диапазон
+#     [0.50, 0.98]. Watchdog проверяет heap раз в checkIntervalMs и
+#     при срабатывании сбрасывает свои кэши. Он НЕ сработает просто
+#     потому что какой-то другой плагин ест heap: дополнительно
+#     проверяется, что сам Collins занимает минимум minOwnedHeapBytes
+#     (по умолчанию 10 МБ). Иначе мы бы зря дёргали свои кэши за
+#     чужие грехи.
+#
+#     Стоимость когда включён: один вызов Runtime.getRuntime() на
+#     проход, пока heap ниже порога; обход своих кэшей только когда
+#     срабатывает.
 memory:
-  heapHighWatermark: 0.85
+  heapHighWatermark: 0.0
+  minOwnedHeapBytes: 10485760
   checkIntervalMs: 10000
