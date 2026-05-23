@@ -238,29 +238,8 @@ public final class CollinsCommand implements TabExecutor {
                     return true;
                 }
 
-                // play = старт с нуля
-                runtime.restartPlayback(s.name());
-
-                Screen updated = new Screen(
-                        s.name(), s.world(),
-                        s.x1(), s.y1(), s.z1(),
-                        s.x2(), s.y2(), s.z2(),
-                        s.axis(),
-                        s.mp4Url(),
-                        true,
-                        s.loop(),
-                        s.volume(),
-                        s.youtubeQuality()
-                );
-
-                store.put(updated);
-                store.save();
-                plugin.prefetchDuration(updated);
-                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
-
-                lang.send(p, "cmd.playing", lang.vars("name", name));
-                plugin.getLogger().info(p.getName() + " play '" + name + "'");
+                plugin.startPlaybackAfterProbe(p, s, /*fromZero=*/true);
                 return true;
             }
 
@@ -346,29 +325,8 @@ public final class CollinsCommand implements TabExecutor {
                     return true;
                 }
 
-                CollinsRuntimeState.Playback pb = runtime.get(s.name());
-                pb.startEpochMs = System.currentTimeMillis();
-
-                Screen updated = new Screen(
-                        s.name(), s.world(),
-                        s.x1(), s.y1(), s.z1(),
-                        s.x2(), s.y2(), s.z2(),
-                        s.axis(),
-                        s.mp4Url(),
-                        true,
-                        s.loop(),
-                        s.volume(),
-                        s.youtubeQuality()
-                );
-
-                store.put(updated);
-                store.save();
-                plugin.prefetchDuration(updated);
-                messenger.requestBroadcastSync();
                 SelectionVisualizer.stop(p);
-
-                lang.send(p, "cmd.resumed", lang.vars("name", name));
-                plugin.getLogger().info(p.getName() + " resume '" + name + "'");
+                plugin.startPlaybackAfterProbe(p, s, /*fromZero=*/false);
                 return true;
             }
 
