@@ -128,20 +128,30 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
             pruneTransientPlayerState();
         }, pruneIntervalTicks * 50L, pruneIntervalTicks * 50L, java.util.concurrent.TimeUnit.MILLISECONDS);
 
-        // Memory watchdog: every 10 seconds, if used heap crosses the
-        // configured high-water mark we drop ALL FFprobe caches and any
-        // per-player bookkeeping that does not point at an online player.
-        // This is the safety net for "the server is starting to thrash" —
-        // we'd rather lose a few cached durations (they get re-probed on
-        // demand) than OOM the JVM. Runs on the async scheduler with a
-        // tiny tick budget (a single Runtime.getRuntime() call per pass
-        // when below threshold) so it does not measurably load the box.
-        double heapHighWatermark = Math.max(0.50, Math.min(0.98,
-                getConfig().getDouble("memory.heapHighWatermark", 0.85)));
+        // Memory watchdog. OFF by default (heapHighWatermark <= 0): the
+        // primary defence is the hard-cap on our own caches (FFprobeUtil
+        // CACHE_MAX_ENTRIES + the per-player maps swept once a minute),
+        // which keep our footprint to well under a megabyte regardless
+        // of server uptime. The watchdog is purely a safety net for
+        // operators who want belt-and-suspenders. When enabled we
+        // explicitly verify that OUR caches are big enough to be worth
+        // clearing before doing anything — otherwise a global heap
+        // spike caused by some unrelated plugin would silently dump our
+        // cached durations and trigger a yt-dlp re-probe storm.
+        double heapHighWatermark = getConfig().getDouble("memory.heapHighWatermark", 0.0);
+        long minFootprintBytes = Math.max(0L,
+                getConfig().getLong("memory.minOwnedHeapBytes", 10L * 1024L * 1024L));
         long memCheckIntervalMs = Math.max(1_000L,
                 getConfig().getLong("memory.checkIntervalMs", 10_000L));
-        Bukkit.getAsyncScheduler().runAtFixedRate(this, t -> runMemoryWatchdog(heapHighWatermark),
-                memCheckIntervalMs, memCheckIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        boolean watchdogEnabled = heapHighWatermark >= 0.50 && heapHighWatermark <= 0.98;
+        if (watchdogEnabled) {
+            getLogger().info(String.format(
+                    "Memory watchdog enabled: trip at heap >= %.0f%%, will only clear if Collins owns >= %d KB.",
+                    heapHighWatermark * 100.0, minFootprintBytes / 1024L));
+            Bukkit.getAsyncScheduler().runAtFixedRate(this,
+                    t -> runMemoryWatchdog(heapHighWatermark, minFootprintBytes),
+                    memCheckIntervalMs, memCheckIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        }
 
         for (Screen screen : store.all()) {
             prefetchDuration(screen);
@@ -322,25 +332,33 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Memory watchdog: when used heap crosses {@code highWatermark}
-     * (a fraction in {@code (0,1)} of {@code Runtime.maxMemory()}) we
-     * aggressively drop every cache the plugin owns. The duration cache
-     * gets rebuilt on demand the next time {@code checkVideoEndings}
-     * needs it, so the worst case is a brief spike in yt-dlp/ffprobe
-     * subprocesses for active screens; the alternative is the JVM
-     * OOMing under the plugin's caches, which on a public server would
-     * take everyone down with it.
+     * Memory watchdog. OFF by default; opted into via
+     * {@code memory.heapHighWatermark} in {@code config.yml}. When
+     * enabled it does TWO checks before dumping anything:
      *
-     * <p>Cheap to call: the success path is a single
-     * {@code Runtime.getRuntime()} read and an {@code if}. We only
-     * touch caches when we actually trip.</p>
+     * <ol>
+     *   <li>Used heap crosses {@code highWatermark} (a fraction of
+     *       {@code Runtime.maxMemory()}).</li>
+     *   <li>Our own caches (estimated via
+     *       {@link FFprobeUtil#estimatedFootprintBytes()} plus the
+     *       size of the per-player and per-screen maps in this
+     *       plugin) account for at least {@code minOwnedBytes}.</li>
+     * </ol>
+     *
+     * <p>Without (2) a global heap spike caused by some other plugin
+     * (a Dynmap render, a worldedit paste, EssentialsX item-frame
+     * scanner, etc.) would silently dump our cached durations and
+     * trigger a yt-dlp re-probe storm without actually freeing
+     * meaningful memory. The cheap path is now: one
+     * {@code Runtime.getRuntime()} read; only when over the
+     * watermark do we walk our own maps to estimate ownership.</p>
      *
      * <p>Hysteresis: once tripped we wait until heap drops back below
      * {@code highWatermark - 0.10} before re-arming, so a heap that
      * lingers near the threshold does not produce a clear/log every
-     * 10 seconds.</p>
+     * tick.</p>
      */
-    private void runMemoryWatchdog(double highWatermark) {
+    private void runMemoryWatchdog(double highWatermark, long minOwnedBytes) {
         Runtime rt = Runtime.getRuntime();
         long max = rt.maxMemory();
         if (max <= 0 || max == Long.MAX_VALUE) {
@@ -363,15 +381,30 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
         if (usedFraction < highWatermark) return;
 
+        // Heap is high. Are WE actually responsible for any meaningful
+        // chunk of it, or is some other plugin filling the heap and
+        // we'd just be punishing ourselves by clearing our caches?
+        long ownedBytes = estimateOwnedHeapBytes();
+        if (ownedBytes < minOwnedBytes) {
+            // Not our problem. Don't spam the log either — the throttle
+            // below the trip line still applies.
+            long now = System.currentTimeMillis();
+            if (now - lastMemoryWatchdogLogAtMs > 10L * 60L * 1000L) {
+                lastMemoryWatchdogLogAtMs = now;
+                getLogger().info(String.format(
+                        "Memory pressure detected (heap %.0f%% >= %.0f%%) but Collins only owns ~%d KB; not clearing.",
+                        usedFraction * 100.0, highWatermark * 100.0, ownedBytes / 1024L));
+            }
+            return;
+        }
+
         memoryWatchdogTripped = true;
         long now = System.currentTimeMillis();
-        // Throttle the warning to at most once per 10 minutes even if
-        // the watchdog keeps tripping.
         if (now - lastMemoryWatchdogLogAtMs > 10L * 60L * 1000L) {
             lastMemoryWatchdogLogAtMs = now;
             getLogger().warning(String.format(
-                    "Memory pressure: heap at %.0f%% (>= %.0f%%); dropping Collins caches to avoid OOM.",
-                    usedFraction * 100.0, highWatermark * 100.0));
+                    "Memory pressure: heap at %.0f%% (>= %.0f%%); Collins owns ~%d KB, dropping caches to avoid OOM.",
+                    usedFraction * 100.0, highWatermark * 100.0, ownedBytes / 1024L));
         }
 
         // Cheap, side-effect-only operations. None of these touch
@@ -380,11 +413,29 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         FFprobeUtil.emergencyClear();
         lastDurationRequestAtMs.clear();
         lastDurationRequestUrl.clear();
-        // Don't touch moddedPlayers / outdatedModdedPlayers — those
-        // are the wire-protocol source of truth and re-deriving them
-        // costs more than they weigh. notifiedAdmins is rebuilt
-        // on next join attempt anyway.
         notifiedAdmins.clear();
+    }
+
+    /**
+     * Order-of-magnitude estimate of how much heap the plugin's own
+     * caches and bookkeeping maps occupy. Used by
+     * {@link #runMemoryWatchdog(double, long)} to refuse to clear our
+     * caches when global heap pressure is not our fault.
+     */
+    private long estimateOwnedHeapBytes() {
+        long total = FFprobeUtil.estimatedFootprintBytes();
+        // ~120 B per per-screen request entry + 2 chars per URL char.
+        for (var e : lastDurationRequestUrl.entrySet()) {
+            String url = e.getValue();
+            total += 120L + (url != null ? 2L * url.length() : 0L);
+        }
+        // ~64 B per Long timestamp entry, keys are screen names.
+        for (var e : lastDurationRequestAtMs.entrySet()) {
+            total += 64L;
+        }
+        // ~32 B per UUID set entry. Cheap.
+        total += notifiedAdmins.size() * 32L;
+        return total;
     }
 
     private void requestDurationIfNeeded(Screen screen) {
