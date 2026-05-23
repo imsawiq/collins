@@ -168,18 +168,6 @@ public final class VideoPlayer {
     }
 
     /**
-     * Cache-on-disk threshold for direct video URLs. Files larger than
-     * this are always downloaded to {@code collins-cache/} before playback
-     * starts instead of being streamed by FFmpeg over HTTP. Streaming a
-     * 2 hour {@code .mp4} from a static host means the connection has to
-     * stay alive for the entire playback, every network blip turns into a
-     * visible stall, and seeking re-buffers from the wire. 50 MB is
-     * roughly the size of a one-minute-long 1080p clip; anything larger
-     * is essentially a "long video" by user-facing standards.
-     */
-    private static final long LARGE_VIDEO_CACHE_THRESHOLD_BYTES = 50L * 1024L * 1024L;
-
-    /**
      * Heuristic: looks like a static/direct video URL by extension. Used
      * together with the probed Content-Type so we cache .mp4-style links
      * even when the upstream server reports {@code application/octet-stream}
@@ -1129,17 +1117,35 @@ public final class VideoPlayer {
                             if (pr.contentDisposition != null && !pr.contentDisposition.isBlank()) {
                                 forceCache = true;
                             }
-                            // Direct video links to long files (e.g. a 2 hour
-                            // mp4 hosted as a static asset) stream over HTTP
-                            // poorly: FFmpeg can keep the connection alive
-                            // for the entire playback, network blips cause
-                            // visible stalls, and seeking a partially-buffered
-                            // file is jittery. Once we know the resource is
-                            // larger than 50 MB we always cache to disk so
+                            // Direct video URLs (.mp4 / .webm / .mkv / .mov /
+                            // .m4v / .ts hosted as static assets, or anything
+                            // the server explicitly labels {@code video/*})
+                            // play back better from a local file than streamed
+                            // over HTTP: FFmpeg has to keep the connection
+                            // alive for the entire video, every network blip
+                            // becomes a visible stall, seeking re-buffers
+                            // from the wire, and on long files (a 2 hour mp4
+                            // can easily be 5+ GB) the upstream eventually
+                            // closes the socket. Cache to disk first so
                             // playback is local-file-fast and seekable.
-                            if (!forceCache && pr.contentLength >= LARGE_VIDEO_CACHE_THRESHOLD_BYTES
-                                    && (looksLikeDirectVideoUrl(url) || (ctLower != null && ctLower.startsWith("video/")))) {
-                                dbg("playOnce: large direct video (" + pr.contentLength + " bytes), forcing cache to disk");
+                            //
+                            // We default to caching for ANY direct video
+                            // link, ignoring Content-Length: a lot of CDNs
+                            // (e.g. cinemap.cc nginx) reply with the slice
+                            // size on a Range request and never include
+                            // {@code Content-Range} on the first byte, so
+                            // a size-gated check would silently fall back
+                            // to streaming a 5 GB file. The disk cache is
+                            // already capped (collins-cache LRU eviction),
+                            // so the worst case is we briefly cache a
+                            // 5 MB clip we could have streamed.
+                            if (!forceCache
+                                    && (looksLikeDirectVideoUrl(url)
+                                        || (ctLower != null && ctLower.startsWith("video/")))) {
+                                String sizeNote = pr.contentLength > 0
+                                        ? "(" + pr.contentLength + " bytes)"
+                                        : "(size unknown)";
+                                dbg("playOnce: direct video URL " + sizeNote + ", forcing cache to disk");
                                 forceCache = true;
                             }
                         }

@@ -56,7 +56,54 @@ public class FFprobeUtil {
      * automatically without a server restart.
      */
     private static final long FAILURE_CACHE_TTL_MS = 10L * 60L * 1000L;
+
+    /**
+     * Long-lived negative cache TTL applied when the upstream platform
+     * returns a hard, non-transient error: YouTube "Sign in to confirm
+     * you're not a bot" (PO token gate), "Video unavailable", "Private
+     * video", "Failed to extract any player response", etc. These don't
+     * recover within minutes; retrying them on the regular 10 minute
+     * loop just spams the server log. Six hours matches our positive
+     * duration TTL so a single yt-dlp upgrade cycle clears them.
+     */
+    private static final long PERMANENT_FAILURE_TTL_MS = 6L * 60L * 60L * 1000L;
+
+    /**
+     * Substrings of yt-dlp / ffprobe error messages that signal a
+     * persistent upstream failure. Match is case-insensitive on a
+     * lower-cased message; keep entries lower-case here.
+     */
+    private static final String[] PERMANENT_FAILURE_MARKERS = {
+            "sign in to confirm",
+            "video unavailable",
+            "private video",
+            "this video is private",
+            "members-only",
+            "failed to extract any player response",
+            "this live event will begin",
+            "premiere will begin",
+            "age-restricted",
+            "removed by the uploader",
+            "account associated with this video has been terminated",
+    };
+
     private static final Map<String, Long> FAILURE_CACHE = new ConcurrentHashMap<>();
+    // Stored value is the absolute expiry timestamp in epoch ms, NOT the
+    // time the failure was recorded. Different errors live in the cache
+    // for different lengths of time (regular network blip = 10 min,
+    // permanent platform error = 6 h), so encoding the deadline directly
+    // is simpler than carrying TTL separately.
+
+    /**
+     * Singleflight registry: when several callers ask for the same URL
+     * inside a short window we want exactly one yt-dlp / ffprobe
+     * subprocess to run, and every caller to wait on the same future.
+     * Without this, three screens all set to the same YouTube link
+     * would each fork their own yt-dlp on every periodic
+     * {@code checkVideoEndings} tick, multiplying CPU/network use and
+     * the rate at which we hit YouTube's bot-detection.
+     */
+    private static final Map<String, CompletableFuture<Long>> IN_FLIGHT = new ConcurrentHashMap<>();
 
     private static Logger logger;
     private static String configFfprobePath = "";
@@ -101,7 +148,22 @@ public class FFprobeUtil {
             return CompletableFuture.completedFuture(0L);
         }
 
-        return CompletableFuture.supplyAsync(() -> {
+        // Singleflight: one yt-dlp / ffprobe per URL at a time. Multiple
+        // concurrent callers (e.g. checkVideoEndings firing on three
+        // screens that all share the same YouTube link) share the same
+        // future and the same subprocess.
+        CompletableFuture<Long> existing = IN_FLIGHT.get(url);
+        if (existing != null) {
+            return existing;
+        }
+
+        CompletableFuture<Long> future = new CompletableFuture<>();
+        CompletableFuture<Long> raced = IN_FLIGHT.putIfAbsent(url, future);
+        if (raced != null) {
+            return raced;
+        }
+
+        CompletableFuture.supplyAsync(() -> {
             try {
                 ProbeResult result = isYtDlpUrl(url) ? probeYtDlpWithFallback(url) : getDurationViaFFprobe(url);
                 if (url != null && !url.isBlank()) {
@@ -113,8 +175,20 @@ public class FFprobeUtil {
                 }
                 return result.durationMs();
             } catch (Exception e) {
+                String msg = e.getMessage();
+                boolean permanent = isPermanentFailure(msg);
                 if (logger != null) {
-                    logger.warning("FFprobe/yt-dlp error for " + shortenUrl(url) + ": " + e.getMessage());
+                    // Log permanent failures at INFO instead of WARNING
+                    // so a single dead YouTube link does not pollute the
+                    // server log every time the duration check runs. The
+                    // long TTL means we only print this once every 6 h
+                    // anyway, but use INFO so admins do not get paged.
+                    String rendered = "FFprobe/yt-dlp error for " + shortenUrl(url) + ": " + msg;
+                    if (permanent) {
+                        logger.info(rendered + " (suppressing for 6 h)");
+                    } else {
+                        logger.warning(rendered);
+                    }
                 }
                 // Negative cache (FAILURE_CACHE) - NOT the duration cache.
                 // Stops log spam without flagging the URL as a live stream,
@@ -124,11 +198,40 @@ public class FFprobeUtil {
                     if (FAILURE_CACHE.size() >= CACHE_MAX_ENTRIES) {
                         evictOldestFailureEntries(FAILURE_CACHE.size() - CACHE_MAX_ENTRIES + 1);
                     }
-                    FAILURE_CACHE.put(url, System.currentTimeMillis());
+                    long ttl = permanent ? PERMANENT_FAILURE_TTL_MS : FAILURE_CACHE_TTL_MS;
+                    FAILURE_CACHE.put(url, System.currentTimeMillis() + ttl);
                 }
                 return 0L;
             }
+        }).whenComplete((v, t) -> {
+            try {
+                if (t != null) {
+                    future.completeExceptionally(t);
+                } else {
+                    future.complete(v != null ? v : 0L);
+                }
+            } finally {
+                IN_FLIGHT.remove(url, future);
+            }
         });
+
+        return future;
+    }
+
+    /**
+     * Recognises error messages that mean the URL will not become
+     * probe-able again any time soon (YouTube bot gate, "Video
+     * unavailable", private/age-restricted, premiere not started, etc.).
+     * Used to extend the negative-cache TTL from 10 min to 6 h so the
+     * server does not re-run yt-dlp on the same dead link every minute.
+     */
+    private static boolean isPermanentFailure(String message) {
+        if (message == null || message.isEmpty()) return false;
+        String lower = message.toLowerCase(Locale.ROOT);
+        for (String marker : PERMANENT_FAILURE_MARKERS) {
+            if (lower.contains(marker)) return true;
+        }
+        return false;
     }
 
     /**
@@ -156,9 +259,9 @@ public class FFprobeUtil {
 
     private static boolean isFailureCached(String url) {
         if (url == null || url.isBlank()) return false;
-        Long failedAtMs = FAILURE_CACHE.get(url);
-        if (failedAtMs == null) return false;
-        if (System.currentTimeMillis() - failedAtMs > FAILURE_CACHE_TTL_MS) {
+        Long expiresAtMs = FAILURE_CACHE.get(url);
+        if (expiresAtMs == null) return false;
+        if (System.currentTimeMillis() >= expiresAtMs) {
             FAILURE_CACHE.remove(url);
             return false;
         }
@@ -204,7 +307,9 @@ public class FFprobeUtil {
     public static void pruneStaleEntries() {
         long now = System.currentTimeMillis();
         DURATION_CACHE.entrySet().removeIf(e -> (now - e.getValue().cachedAtMs()) > CACHE_TTL_MS);
-        FAILURE_CACHE.entrySet().removeIf(e -> (now - e.getValue()) > FAILURE_CACHE_TTL_MS);
+        // FAILURE_CACHE values are absolute expiry timestamps now, so
+        // drop anything whose deadline is in the past.
+        FAILURE_CACHE.entrySet().removeIf(e -> now >= e.getValue());
     }
 
     /**
