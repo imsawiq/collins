@@ -63,6 +63,7 @@ public final class CollinsFabricClient implements ClientModInitializer {
         ClientPlayConnectionEvents.DISCONNECT.register((handler, client) -> {
             VideoScreenManager.stopAll();
             CollinsNet.MODDED_PLAYERS.clear();
+            CollinsNet.OUTDATED_MODDED_PLAYERS.clear();
         });
 
         // Belt-and-suspenders: also wipe state on JOIN. Velocity/BungeeCord
@@ -73,6 +74,7 @@ public final class CollinsFabricClient implements ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             VideoScreenManager.stopAll();
             CollinsNet.MODDED_PLAYERS.clear();
+            CollinsNet.OUTDATED_MODDED_PLAYERS.clear();
         });
     }
 }

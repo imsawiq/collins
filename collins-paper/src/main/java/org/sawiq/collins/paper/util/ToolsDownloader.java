@@ -118,12 +118,13 @@ public final class ToolsDownloader {
     }
 
     private static boolean downloadFile(String urlStr, Path target) {
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        HttpURLConnection conn = null;
         try {
-            Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
             Files.deleteIfExists(tmp);
 
             URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setInstanceFollowRedirects(true);
             conn.setConnectTimeout(30_000);
             conn.setReadTimeout(120_000);
@@ -132,7 +133,6 @@ public final class ToolsDownloader {
             int code = conn.getResponseCode();
             if (code != 200) {
                 log("Download failed, HTTP " + code + ": " + urlStr);
-                conn.disconnect();
                 return false;
             }
 
@@ -159,14 +159,19 @@ public final class ToolsDownloader {
                 }
             }
 
-            conn.disconnect();
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             log("Downloaded: " + target.getFileName());
             return true;
 
         } catch (Exception e) {
             log("Download error: " + e.getMessage());
+            // Drop the half-written .tmp so a retry starts clean.
+            try { Files.deleteIfExists(tmp); } catch (Exception ignored) {}
             return false;
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -182,11 +187,12 @@ public final class ToolsDownloader {
         String suffix = isZip ? ".zip.tmp" : ".tar.xz.tmp";
         Path archiveTmp = toolsDir.resolve("ffmpeg" + suffix);
 
+        HttpURLConnection conn = null;
         try {
             Files.deleteIfExists(archiveTmp);
 
             URL url = new URL(archiveUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn = (HttpURLConnection) url.openConnection();
             conn.setInstanceFollowRedirects(true);
             conn.setConnectTimeout(30_000);
             conn.setReadTimeout(300_000);
@@ -195,7 +201,6 @@ public final class ToolsDownloader {
             int code = conn.getResponseCode();
             if (code != 200) {
                 log("FFmpeg download failed, HTTP " + code);
-                conn.disconnect();
                 return false;
             }
 
@@ -221,7 +226,12 @@ public final class ToolsDownloader {
                     }
                 }
             }
-            conn.disconnect();
+            // Disconnect now so the socket is released BEFORE the
+            // potentially-slow archive extraction; keeping the
+            // connection alive while we shell out to `tar` does
+            // nothing useful and pins a system file descriptor.
+            try { conn.disconnect(); } catch (Exception ignored) {}
+            conn = null;
 
             log("Extracting ffprobe...");
             boolean extracted = isZip
@@ -247,6 +257,10 @@ public final class ToolsDownloader {
             log("FFmpeg download/extract error: " + e.getMessage());
             try { Files.deleteIfExists(archiveTmp); } catch (Exception ignored) {}
             return false;
+        } finally {
+            if (conn != null) {
+                try { conn.disconnect(); } catch (Exception ignored) {}
+            }
         }
     }
 

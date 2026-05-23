@@ -24,4 +24,25 @@ public final class SelectionService {
         Selection s = get(p);
         selections.put(p.getUniqueId(), new Selection(s.pos1(), b));
     }
+
+    /**
+     * Drop the selection state for a player who has just left the
+     * server. Without this, {@link #selections} would keep one entry
+     * forever for every player who ever ran {@code /collins pos1} or
+     * {@code /collins pos2}. Called from
+     * {@code CollinsPaperPlugin#onQuit}.
+     */
+    public void forget(UUID uuid) {
+        if (uuid != null) selections.remove(uuid);
+    }
+
+    /**
+     * Defensive periodic sweep: drop any selection whose owner UUID is
+     * no longer in the supplied online set. Backstop in case
+     * {@code PlayerQuitEvent} was missed.
+     */
+    public void forgetMissingPlayers(java.util.Set<UUID> online) {
+        if (online == null) return;
+        selections.keySet().removeIf(uuid -> !online.contains(uuid));
+    }
 }
