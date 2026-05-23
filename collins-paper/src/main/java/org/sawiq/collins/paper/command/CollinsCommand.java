@@ -36,6 +36,25 @@ public final class CollinsCommand implements TabExecutor {
 
     private final Map<UUID, Long> lastCommandAtMs = new ConcurrentHashMap<>();
 
+    /**
+     * Drop the rate-limit timestamp for a player who has just left the
+     * server. Without this, {@link #lastCommandAtMs} would keep one entry
+     * forever for every player who ever ran {@code /collins ...}. Called
+     * from {@link CollinsPaperPlugin#onQuit}.
+     */
+    public void forgetPlayer(UUID uuid) {
+        if (uuid != null) lastCommandAtMs.remove(uuid);
+    }
+
+    /**
+     * Drop rate-limit timestamps for any UUID not currently online. Used
+     * as a defensive periodic sweep in case {@code onQuit} was missed.
+     */
+    public void forgetMissingPlayers(java.util.Set<UUID> online) {
+        if (online == null) return;
+        lastCommandAtMs.keySet().removeIf(uuid -> !online.contains(uuid));
+    }
+
     public CollinsCommand(CollinsPaperPlugin plugin,
                           ScreenStore store,
                           PlaylistStore playlistStore,

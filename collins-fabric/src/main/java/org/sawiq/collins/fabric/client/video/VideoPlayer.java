@@ -167,6 +167,35 @@ public final class VideoPlayer {
         return false;
     }
 
+    /**
+     * Cache-on-disk threshold for direct video URLs. Files larger than
+     * this are always downloaded to {@code collins-cache/} before playback
+     * starts instead of being streamed by FFmpeg over HTTP. Streaming a
+     * 2 hour {@code .mp4} from a static host means the connection has to
+     * stay alive for the entire playback, every network blip turns into a
+     * visible stall, and seeking re-buffers from the wire. 50 MB is
+     * roughly the size of a one-minute-long 1080p clip; anything larger
+     * is essentially a "long video" by user-facing standards.
+     */
+    private static final long LARGE_VIDEO_CACHE_THRESHOLD_BYTES = 50L * 1024L * 1024L;
+
+    /**
+     * Heuristic: looks like a static/direct video URL by extension. Used
+     * together with the probed Content-Type so we cache .mp4-style links
+     * even when the upstream server reports {@code application/octet-stream}
+     * or omits the header entirely.
+     */
+    private static boolean looksLikeDirectVideoUrl(String url) {
+        if (url == null) return false;
+        String u = url.toLowerCase(Locale.ROOT);
+        // Strip query string for the extension check; many CDNs append
+        // {@code ?token=...} or {@code ?signed=...} to plain mp4 URLs.
+        int q = u.indexOf('?');
+        if (q >= 0) u = u.substring(0, q);
+        return u.endsWith(".mp4") || u.endsWith(".webm") || u.endsWith(".mkv")
+                || u.endsWith(".mov") || u.endsWith(".m4v") || u.endsWith(".ts");
+    }
+
     private static String stripFragment(String url) {
         if (url == null) return null;
         int i = url.indexOf('#');
@@ -1100,6 +1129,19 @@ public final class VideoPlayer {
                             if (pr.contentDisposition != null && !pr.contentDisposition.isBlank()) {
                                 forceCache = true;
                             }
+                            // Direct video links to long files (e.g. a 2 hour
+                            // mp4 hosted as a static asset) stream over HTTP
+                            // poorly: FFmpeg can keep the connection alive
+                            // for the entire playback, network blips cause
+                            // visible stalls, and seeking a partially-buffered
+                            // file is jittery. Once we know the resource is
+                            // larger than 50 MB we always cache to disk so
+                            // playback is local-file-fast and seekable.
+                            if (!forceCache && pr.contentLength >= LARGE_VIDEO_CACHE_THRESHOLD_BYTES
+                                    && (looksLikeDirectVideoUrl(url) || (ctLower != null && ctLower.startsWith("video/")))) {
+                                dbg("playOnce: large direct video (" + pr.contentLength + " bytes), forcing cache to disk");
+                                forceCache = true;
+                            }
                         }
 
                         dbg("playOnce: forceCache=" + forceCache + " forceMp4Demuxer=" + forceMp4Demuxer + " url=" + url);
@@ -1676,14 +1718,16 @@ public final class VideoPlayer {
         final boolean isHttp;
         final String contentDisposition;
         final int httpCode;
+        final long contentLength;
 
-        private ProbeResult(String finalUrl, String contentType, boolean supportsRange, boolean isHttp, String contentDisposition, int httpCode) {
+        private ProbeResult(String finalUrl, String contentType, boolean supportsRange, boolean isHttp, String contentDisposition, int httpCode, long contentLength) {
             this.finalUrl = finalUrl;
             this.contentType = contentType;
             this.supportsRange = supportsRange;
             this.isHttp = isHttp;
             this.contentDisposition = contentDisposition;
             this.httpCode = httpCode;
+            this.contentLength = contentLength;
         }
     }
 
@@ -1727,7 +1771,7 @@ public final class VideoPlayer {
                 if (code >= 300 && code < 400) {
                     String loc = c.getHeaderField("Location");
                     c.disconnect();
-                    if (loc == null || loc.isBlank()) return new ProbeResult(cur, null, false, true, null, code);
+                    if (loc == null || loc.isBlank()) return new ProbeResult(cur, null, false, true, null, code, -1L);
                     URL next = new URL(base, loc);
                     cur = next.toString();
                     continue;
@@ -1741,7 +1785,7 @@ public final class VideoPlayer {
                     }
                     dbg("probe: http error code=" + code + " url=" + cur + " ct=" + ct);
                     c.disconnect();
-                    return new ProbeResult(cur, ct, false, true, null, code);
+                    return new ProbeResult(cur, ct, false, true, null, code, -1L);
                 }
 
                 String ct = c.getHeaderField("Content-Type");
@@ -1755,9 +1799,28 @@ public final class VideoPlayer {
                     len = c.getContentLengthLong();
                 } catch (Exception ignored) {
                 }
+                // Content-Length on a Range request reports the size of
+                // the requested slice, not the whole resource. Parse the
+                // total from Content-Range when present so the caller can
+                // correctly decide whether to stream or cache to disk.
+                if (code == 206) {
+                    String contentRange = c.getHeaderField("Content-Range");
+                    if (contentRange != null) {
+                        int slash = contentRange.indexOf('/');
+                        if (slash >= 0 && slash + 1 < contentRange.length()) {
+                            String total = contentRange.substring(slash + 1).trim();
+                            if (!total.isEmpty() && !"*".equals(total)) {
+                                try {
+                                    len = Long.parseLong(total);
+                                } catch (NumberFormatException ignored) {
+                                }
+                            }
+                        }
+                    }
+                }
                 dbg("probe: finalUrl=" + cur + " ct=" + ct + " ar=" + ar + " len=" + len + " supportsRange=" + supportsRange + " cd=" + cd);
                 c.disconnect();
-                return new ProbeResult(cur, ct, supportsRange, true, cd, code);
+                return new ProbeResult(cur, ct, supportsRange, true, cd, code, len);
             }
         } catch (Exception e) {
             dbg("probe: exception " + e + " url=" + u);
