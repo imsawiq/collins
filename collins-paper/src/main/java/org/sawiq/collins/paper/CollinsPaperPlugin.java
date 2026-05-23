@@ -12,6 +12,7 @@ import org.sawiq.collins.paper.model.Screen;
 import org.sawiq.collins.paper.net.CollinsClientMessageListener;
 import org.sawiq.collins.paper.net.CollinsMessenger;
 import org.sawiq.collins.paper.selection.SelectionService;
+import org.sawiq.collins.paper.selection.SelectionVisualizer;
 import org.sawiq.collins.paper.state.CollinsRuntimeState;
 import org.sawiq.collins.paper.store.PlaylistStore;
 import org.sawiq.collins.paper.store.ScreenStore;
@@ -36,6 +37,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private CollinsRuntimeState runtime;
     private Lang lang;
     private CollinsCommand collinsCommand;
+    private CollinsClientMessageListener clientMessageListener;
     private final Set<UUID> moddedPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, String> moddedPlayerVersions = new ConcurrentHashMap<>();
     private final Set<UUID> outdatedModdedPlayers = ConcurrentHashMap.newKeySet();
@@ -89,9 +91,9 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, this);
         Bukkit.getMessenger().registerOutgoingPluginChannel(this, "collins:main");
-        Bukkit.getMessenger().registerIncomingPluginChannel(this, "collins:main",
-                new CollinsClientMessageListener(this, moddedPlayers, moddedPlayerVersions,
-                        outdatedModdedPlayers, messenger, this::isClientModOutdated));
+        clientMessageListener = new CollinsClientMessageListener(this, moddedPlayers, moddedPlayerVersions,
+                outdatedModdedPlayers, messenger, this::isClientModOutdated);
+        Bukkit.getMessenger().registerIncomingPluginChannel(this, "collins:main", clientMessageListener);
 
         ToolsDownloader.init(getLogger(), getDataFolder().toPath());
         if (getConfig().getBoolean("ffprobe.auto_download", true)) {
@@ -534,6 +536,12 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         if (collinsCommand != null) {
             collinsCommand.forgetMissingPlayers(online);
         }
+        if (clientMessageListener != null) {
+            clientMessageListener.forgetMissingPlayers(online);
+        }
+        if (selection != null) {
+            selection.forgetMissingPlayers(online);
+        }
     }
 
     /**
@@ -738,8 +746,31 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        store.save();
-        playlistStore.save();
+        // Folia/Paper auto-cancel scheduled tasks owned by this plugin
+        // when the JavaPlugin instance is disabled (BukkitScheduler /
+        // GlobalRegionScheduler / AsyncScheduler all listen for the
+        // PluginDisableEvent), so the periodic prune / memory-watchdog
+        // / video-end-check tasks unwind themselves. We still need to:
+        //   * cancel SelectionVisualizer tasks (they are owned by the
+        //     player's region scheduler — auto-cancel on plugin
+        //     disable applies, but the TASKS map stays populated and
+        //     would be wrong after a /reload that re-enables the
+        //     plugin in the same JVM).
+        //   * persist on-disk state once more.
+        // Caches are static and live with the JVM, so we don't try to
+        // clear them: a /reload would lose useful probe history for
+        // no benefit.
+        SelectionVisualizer.stopAll();
+        try {
+            store.save();
+        } catch (Exception e) {
+            getLogger().warning("Failed to save screen store on disable: " + e.getMessage());
+        }
+        try {
+            playlistStore.save();
+        } catch (Exception e) {
+            getLogger().warning("Failed to save playlist store on disable: " + e.getMessage());
+        }
     }
 
     @EventHandler
@@ -776,6 +807,19 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         // keep one entry per player who ever ran `/collins ...`.
         if (collinsCommand != null) {
             collinsCommand.forgetPlayer(uuid);
+        }
+        if (clientMessageListener != null) {
+            clientMessageListener.forgetPlayer(uuid);
+        }
+        // Cancel the selection-visualizer scheduled task and drop the
+        // player's pos1/pos2 selection. Without this, a player who
+        // started a selection but logged out mid-edit would leave a
+        // ScheduledTask running for up to 60 s targeting a vanished
+        // entity, plus a stale UUID -> Selection entry sitting in
+        // SelectionService forever.
+        SelectionVisualizer.stop(e.getPlayer());
+        if (selection != null) {
+            selection.forget(uuid);
         }
         if (moddedPlayers.remove(uuid)) {
             messenger.requestBroadcastSync();

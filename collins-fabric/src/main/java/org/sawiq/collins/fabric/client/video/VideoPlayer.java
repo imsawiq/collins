@@ -1523,6 +1523,10 @@ public final class VideoPlayer {
                     grabber.stop();
                 } catch (Exception ignored) {
                 }
+                // grabber.close() is implicitly called by the
+                // try-with-resources around the FFmpegFrameGrabber
+                // declaration above; do NOT call it manually here, that
+                // would close the native context twice.
             }
 
         } catch (Exception e) {

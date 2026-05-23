@@ -22,6 +22,16 @@ public final class CollinsClientMessageListener implements PluginMessageListener
     private final CollinsMessenger messenger;
     private final Predicate<String> outdatedVersionPredicate;
 
+    /**
+     * Throttle HELLO messages from any single player. The legitimate
+     * client only sends HELLO once per ~10 s; a malicious or modified
+     * client could flood it to amplify broadcastSync work on the
+     * server. Drop everything from a UUID that already HELLO'd in
+     * the last 5 s.
+     */
+    private static final long HELLO_RATE_LIMIT_MS = 5_000L;
+    private final java.util.Map<UUID, Long> lastHelloAtMs = new java.util.concurrent.ConcurrentHashMap<>();
+
     public CollinsClientMessageListener(JavaPlugin plugin, Set<UUID> moddedPlayers,
                                         Map<UUID, String> moddedPlayerVersions,
                                         Set<UUID> outdatedModdedPlayers,
@@ -94,6 +104,18 @@ public final class CollinsClientMessageListener implements PluginMessageListener
     private void handleHello(Player player, DataInputStream in) throws Exception {
         // Клиент с модом Collins-Fabric подключился
         UUID uuid = player.getUniqueId();
+
+        // Rate-limit: legit clients send HELLO once every 10 s, a
+        // misbehaving / modified client could spam it to amplify
+        // broadcastSync. Drop messages that arrive faster than once
+        // per HELLO_RATE_LIMIT_MS per player.
+        long now = System.currentTimeMillis();
+        Long previous = lastHelloAtMs.get(uuid);
+        if (previous != null && (now - previous) < HELLO_RATE_LIMIT_MS) {
+            return;
+        }
+        lastHelloAtMs.put(uuid, now);
+
         String clientVersion = in.available() > 0 ? sanitizeVersion(in.readUTF()) : "unknown";
 
         boolean added = moddedPlayers.add(uuid);
@@ -108,6 +130,25 @@ public final class CollinsClientMessageListener implements PluginMessageListener
             }
             messenger.requestBroadcastSync();
         }
+    }
+
+    /**
+     * Drop rate-limit timestamps for any UUID not currently online.
+     * Defensive periodic sweep in case a {@code PlayerQuitEvent} was
+     * missed.
+     */
+    public void forgetMissingPlayers(java.util.Set<UUID> online) {
+        if (online == null) return;
+        lastHelloAtMs.keySet().removeIf(uuid -> !online.contains(uuid));
+    }
+
+    /**
+     * Drop the rate-limit timestamp for a player who has just left.
+     * Without this, {@link #lastHelloAtMs} would keep an entry forever
+     * for every player that ever connected with the mod.
+     */
+    public void forgetPlayer(UUID uuid) {
+        if (uuid != null) lastHelloAtMs.remove(uuid);
     }
 
     private static String sanitizeVersion(String value) {

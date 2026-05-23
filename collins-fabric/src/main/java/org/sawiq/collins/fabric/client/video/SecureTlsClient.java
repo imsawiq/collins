@@ -68,6 +68,15 @@ public final class SecureTlsClient {
     private static final long DNS_CACHE_TTL_MS = 5 * 60 * 1000L;
     private static final long FALLBACK_CACHE_TTL_MS = 30_000L;
 
+    /**
+     * Hard cap on the DNS cache size. The plugin only ever resolves a
+     * tiny set of hosts (the ~5 streaming platforms we support plus
+     * their CDNs), so 64 is far above the steady-state. The cap is
+     * here purely to defend against pathological inputs (a flood of
+     * fresh URLs on weird hosts causing the map to grow forever).
+     */
+    private static final int DNS_CACHE_MAX_ENTRIES = 64;
+
     private static final ConcurrentHashMap<String, CachedAddrs> DNS_CACHE = new ConcurrentHashMap<>();
 
     private record CachedAddrs(List<InetAddress> ips, long expiresAtMs) {
@@ -280,7 +289,7 @@ public final class SecureTlsClient {
             try {
                 List<InetAddress> ips = dohQuery(doh[0], doh[1], hostname);
                 if (!ips.isEmpty()) {
-                    DNS_CACHE.put(hostname, new CachedAddrs(ips, now + DNS_CACHE_TTL_MS));
+                    putBoundedDnsCache(hostname, new CachedAddrs(ips, now + DNS_CACHE_TTL_MS));
                     return ips;
                 }
             } catch (Exception ignored) {
@@ -294,12 +303,34 @@ public final class SecureTlsClient {
                 if (a instanceof Inet4Address) ipv4.add(a);
             }
             if (!ipv4.isEmpty()) {
-                DNS_CACHE.put(hostname, new CachedAddrs(ipv4, now + FALLBACK_CACHE_TTL_MS));
+                putBoundedDnsCache(hostname, new CachedAddrs(ipv4, now + FALLBACK_CACHE_TTL_MS));
                 return ipv4;
             }
         } catch (Exception ignored) {
         }
         return Collections.emptyList();
+    }
+
+    /**
+     * Insert into the DNS cache, evicting the entry with the soonest
+     * expiry first if we're over {@link #DNS_CACHE_MAX_ENTRIES}. Cheap
+     * even on a hit (the size check short-circuits), and keeps the
+     * resident set bounded against pathological resolve floods.
+     */
+    private static void putBoundedDnsCache(String hostname, CachedAddrs entry) {
+        if (DNS_CACHE.size() >= DNS_CACHE_MAX_ENTRIES) {
+            // Drop the entry that expires soonest; on a tie any one is fine.
+            String evict = null;
+            long minExpiry = Long.MAX_VALUE;
+            for (var e : DNS_CACHE.entrySet()) {
+                if (e.getValue().expiresAtMs() < minExpiry) {
+                    minExpiry = e.getValue().expiresAtMs();
+                    evict = e.getKey();
+                }
+            }
+            if (evict != null) DNS_CACHE.remove(evict);
+        }
+        DNS_CACHE.put(hostname, entry);
     }
 
     private static List<InetAddress> dohQuery(String dohIp, String dohSni, String hostname)
