@@ -10,6 +10,9 @@ error.selection_invalid: "{prefix} &cSelection must be a rectangle plane with th
 error.bad_number: "{prefix} &cBad number."
 error.invalid_screen_name: "{prefix} &cInvalid screen name: &f{name}"
 error.invalid_url: "{prefix} &cInvalid or blocked URL."
+error.no_url: "{prefix} &cScreen has no URL set yet. Use &f/collins seturl {name} <url>&c first."
+error.bad_url: "{prefix} &cURL scheme is not playable. Use http(s)/rtmp(s)/rtsp."
+error.dead_url: "{prefix} &cThis URL has been flagged as dead by yt-dlp/ffprobe (private, age-restricted, gone, or login-gated). Refusing to start playback. Set a different URL with &f/collins seturl&c."
 error.rate_limited: "{prefix} &cToo fast. Try again in &f{ms}ms&c."
 error.seek_too_large: "{prefix} &cSeek too large. Max: &f{max}s"
 
