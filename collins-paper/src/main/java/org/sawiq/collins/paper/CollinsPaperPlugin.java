@@ -398,10 +398,16 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
      * the URL as live, we proceed with the start and broadcast a
      * sync packet to clients.</p>
      *
-     * <p>Hard timeout: {@code 8 s}. After that we either trust a cached
-     * positive answer or refuse, regardless of whether yt-dlp is still
-     * running in the background. Chat commands are not allowed to
-     * stall the server thread for longer than that.</p>
+     * <p>Hard timeout: configurable via
+     * {@code video.preflightTimeoutSeconds}, defaults to {@code 30 s}.
+     * After that we either trust a cached positive answer or refuse,
+     * regardless of whether yt-dlp is still running in the background.
+     * Chat commands are not allowed to stall the server thread for
+     * longer than that. The 30 s default covers slow CDNs (cinemap.cc,
+     * paid streaming hosts) where the first byte can take 10-20 s
+     * after a cold connect; the previous 8 s default refused those
+     * URLs spuriously and made admins re-issue {@code /collins play}
+     * two or three times before it stuck.</p>
      */
     public void startPlaybackAfterProbe(org.bukkit.entity.Player player, Screen screen, boolean fromZero) {
         String name = screen.name();
@@ -430,9 +436,16 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         // Run the probe asynchronously and dispatch the result back to
         // the global region scheduler so all store/runtime mutations
         // happen on a Bukkit thread (Folia-safe).
+        // Probe timeout is clamped to a sensible range: 5 s minimum
+        // (any less and we'd miss every yt-dlp warm start), 120 s
+        // maximum (longer than that and the player will assume
+        // /collins play is broken and try other things, racing the
+        // probe against itself).
+        long preflightTimeoutSeconds = Math.max(5L, Math.min(120L,
+                getConfig().getLong("video.preflightTimeoutSeconds", 30L)));
         java.util.concurrent.CompletableFuture<Long> probeFuture = FFprobeUtil.getDurationMs(url);
         java.util.concurrent.CompletableFuture<Long> bounded = probeFuture
-                .completeOnTimeout(0L, 8, java.util.concurrent.TimeUnit.SECONDS);
+                .completeOnTimeout(0L, preflightTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
 
         bounded.whenComplete((duration, ex) -> Bukkit.getGlobalRegionScheduler().execute(this, () -> {
             // Re-fetch the screen to pick up any changes the player or

@@ -17,6 +17,22 @@ video:
   #     Меньше значение = меньше рассинхрон у клиентов.
   syncBroadcastIntervalTicks: 20
 
+  # EN: Hard timeout for the server-side URL validation that runs
+  #     before /collins play and /collins resume. We let yt-dlp /
+  #     ffprobe try to resolve the URL for at most this many seconds
+  #     before either trusting a cached positive answer (instant) or
+  #     refusing the start. Slow CDNs (cinemap.cc / paid streaming
+  #     hosts) can take 10-20 s to first byte after a cold connect,
+  #     so the default is intentionally generous. Clamped to [5, 120].
+  # RU: Жёсткий таймаут серверной проверки URL перед /collins play и
+  #     /collins resume. yt-dlp / ffprobe получают столько секунд на
+  #     резолв; после — либо доверяем кэшу (мгновенно), либо
+  #     отказываем. Медленные CDN (cinemap.cc / платные стриминговые
+  #     хосты) могут отдавать первый байт через 10-20 секунд после
+  #     холодного коннекта, поэтому дефолт сделан с запасом.
+  #     Допустимый диапазон: [5, 120].
+  preflightTimeoutSeconds: 30
+
 # EN: Security settings for /collins admin commands and URLs.
 # RU: Настройки безопасности для админ-команд /collins и URL.
 security:
