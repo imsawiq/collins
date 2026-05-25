@@ -25,3 +25,10 @@ tasks {
 java {
     toolchain.languageVersion = JavaLanguageVersion.of(21)
 }
+
+// On the 26.1 branch we suffix the plugin jar with the targeted MC
+// version so a release ZIP can pair collins-fabric-<v>-mc26.1.2.jar
+// with collins-paper-<v>-mc26.1.2.jar without ambiguity.
+tasks.named("jar") {
+    archiveFileName = "${project.name}-${project.version}-mc26.1.2.jar"
+}
