@@ -429,8 +429,9 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         // probe that completes instantly (e.g. cache miss, but the
         // probe is fast on this URL) does not produce a redundant
         // "validating" line above the "now playing" line.
+        java.util.concurrent.atomic.AtomicBoolean probeFinished = new java.util.concurrent.atomic.AtomicBoolean(false);
         Bukkit.getAsyncScheduler().runDelayed(this, t -> {
-            if (player.isOnline()) {
+            if (!probeFinished.get() && player.isOnline()) {
                 lang.send(player, "cmd.validating", lang.vars("name", name, "url", url));
             }
         }, 800L, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -450,44 +451,47 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         java.util.concurrent.CompletableFuture<Long> bounded = probeFuture
                 .completeOnTimeout(0L, preflightTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
 
-        bounded.whenComplete((duration, ex) -> Bukkit.getGlobalRegionScheduler().execute(this, () -> {
-            // Re-fetch the screen to pick up any changes the player or
-            // another admin may have made while the probe was running.
-            Screen current = store.get(name);
-            if (current == null) {
-                if (player.isOnline()) {
-                    lang.send(player, "error.screen_not_found", lang.vars("name", name));
+        bounded.whenComplete((duration, ex) -> {
+            probeFinished.set(true);
+            Bukkit.getGlobalRegionScheduler().execute(this, () -> {
+                // Re-fetch the screen to pick up any changes the player or
+                // another admin may have made while the probe was running.
+                Screen current = store.get(name);
+                if (current == null) {
+                    if (player.isOnline()) {
+                        lang.send(player, "error.screen_not_found", lang.vars("name", name));
+                    }
+                    return;
                 }
-                return;
-            }
-            if (!java.util.Objects.equals(current.mp4Url(), url)) {
-                // URL changed mid-probe; abort, the new URL needs its own
-                // round of validation.
-                if (player.isOnline()) {
-                    lang.send(player, "cmd.validation_aborted",
-                            lang.vars("name", name, "url", url));
+                if (!java.util.Objects.equals(current.mp4Url(), url)) {
+                    // URL changed mid-probe; abort, the new URL needs its own
+                    // round of validation.
+                    if (player.isOnline()) {
+                        lang.send(player, "cmd.validation_aborted",
+                                lang.vars("name", name, "url", url));
+                    }
+                    return;
                 }
-                return;
-            }
 
-            boolean live = FFprobeUtil.isKnownLive(url);
-            long durationFromCache = FFprobeUtil.getCachedDurationMs(url);
-            long resolvedDuration = duration != null && duration > 0
-                    ? duration
-                    : durationFromCache;
+                boolean live = FFprobeUtil.isKnownLive(url);
+                long durationFromCache = FFprobeUtil.getCachedDurationMs(url);
+                long resolvedDuration = duration != null && duration > 0
+                        ? duration
+                        : durationFromCache;
 
-            if (resolvedDuration <= 0 && !live) {
-                if (player.isOnline()) {
-                    lang.send(player, "error.unplayable_url",
-                            lang.vars("name", name, "url", url));
+                if (resolvedDuration <= 0 && !live) {
+                    if (player.isOnline()) {
+                        lang.send(player, "error.unplayable_url",
+                                lang.vars("name", name, "url", url));
+                    }
+                    getLogger().info(player.getName() + " play '" + name
+                            + "' rejected: probe returned no duration for " + url);
+                    return;
                 }
-                getLogger().info(player.getName() + " play '" + name
-                        + "' rejected: probe returned no duration for " + url);
-                return;
-            }
 
-            doStartPlaybackOnServerThread(player, current, fromZero, "probe ok");
-        }));
+                doStartPlaybackOnServerThread(player, current, fromZero, "probe ok");
+            });
+        });
     }
 
     private void doStartPlaybackOnServerThread(org.bukkit.entity.Player player, Screen s,
