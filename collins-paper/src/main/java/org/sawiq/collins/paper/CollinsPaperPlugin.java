@@ -38,6 +38,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private Lang lang;
     private CollinsCommand collinsCommand;
     private CollinsClientMessageListener clientMessageListener;
+    private int ffprobeTimeoutSeconds = 30;
     private final Set<UUID> moddedPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, String> moddedPlayerVersions = new ConcurrentHashMap<>();
     private final Set<UUID> outdatedModdedPlayers = ConcurrentHashMap.newKeySet();
@@ -104,7 +105,8 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         String ytdlpPath = getConfig().getString("ffprobe.ytdlp", "");
         if (ffprobePath.isEmpty() || ffprobePath.equals("auto")) ffprobePath = ToolsDownloader.getFfprobePath();
         if (ytdlpPath.isEmpty() || ytdlpPath.equals("auto")) ytdlpPath = ToolsDownloader.getYtdlpPath();
-        FFprobeUtil.init(getLogger(), ffprobePath, ytdlpPath, getConfig().getInt("ffprobe.timeout", 30));
+        ffprobeTimeoutSeconds = Math.max(1, getConfig().getInt("ffprobe.timeout", 30));
+        FFprobeUtil.init(getLogger(), ffprobePath, ytdlpPath, ffprobeTimeoutSeconds);
 
         int endCheckIntervalTicks = Math.max(1, getConfig().getInt("video.endCheckIntervalTicks", 10));
         // Folia-safe: use the global region scheduler instead of the legacy
@@ -441,8 +443,9 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         // maximum (longer than that and the player will assume
         // /collins play is broken and try other things, racing the
         // probe against itself).
-        long preflightTimeoutSeconds = Math.max(5L, Math.min(120L,
-                getConfig().getLong("video.preflightTimeoutSeconds", 30L)));
+        long configuredPreflightTimeoutSeconds = getConfig().getLong("video.preflightTimeoutSeconds", 30L);
+        long preflightTimeoutSeconds = Math.max(configuredPreflightTimeoutSeconds, ffprobeTimeoutSeconds);
+        preflightTimeoutSeconds = Math.max(5L, Math.min(120L, preflightTimeoutSeconds));
         java.util.concurrent.CompletableFuture<Long> probeFuture = FFprobeUtil.getDurationMs(url);
         java.util.concurrent.CompletableFuture<Long> bounded = probeFuture
                 .completeOnTimeout(0L, preflightTimeoutSeconds, java.util.concurrent.TimeUnit.SECONDS);
