@@ -260,13 +260,13 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
                 continue;
             }
 
-            long duration = runtime.getDurationMs(screen.name());
+            long duration = runtime.getDurationMs(screen.name(), screen.mp4Url());
 
             if (duration <= 0) {
                 requestDurationIfNeeded(screen);
             }
 
-            if (!runtime.isVideoEnded(screen.name())) {
+            if (!runtime.isVideoEnded(screen.name(), screen.mp4Url())) {
                 continue;
             }
 
@@ -421,7 +421,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
         long cached = FFprobeUtil.getCachedDurationMs(url);
         boolean knownLive = FFprobeUtil.isKnownLive(url);
         if (cached > 0 || knownLive) {
-            doStartPlaybackOnServerThread(player, screen, fromZero, "cached probe ok");
+            doStartPlaybackOnServerThread(player, screen, fromZero, cached, "cached probe ok");
             return;
         }
 
@@ -489,18 +489,23 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
                     return;
                 }
 
-                doStartPlaybackOnServerThread(player, current, fromZero, "probe ok");
+                doStartPlaybackOnServerThread(player, current, fromZero, resolvedDuration, "probe ok");
             });
         });
     }
 
     private void doStartPlaybackOnServerThread(org.bukkit.entity.Player player, Screen s,
-                                               boolean fromZero, String reason) {
+                                               boolean fromZero, long durationMs, String reason) {
         if (fromZero) {
-            runtime.restartPlayback(s.name());
+            runtime.restartPlayback(s.name(), durationMs > 0);
         } else {
             CollinsRuntimeState.Playback pb = runtime.get(s.name());
             pb.startEpochMs = System.currentTimeMillis();
+        }
+        if (durationMs > 0) {
+            runtime.setDurationFromServer(s.name(), s.mp4Url(), durationMs);
+        } else {
+            runtime.clearDuration(s.name());
         }
 
         Screen updated = new Screen(
@@ -689,7 +694,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
 
         long cachedDuration = FFprobeUtil.getCachedDurationMs(url);
         if (cachedDuration > 0) {
-            runtime.setDurationFromServer(screenName, cachedDuration);
+            runtime.setDurationFromServer(screenName, url, cachedDuration);
             return;
         }
 
@@ -716,7 +721,7 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
                 if (!Objects.equals(current.mp4Url(), requestedUrl)) {
                     return;
                 }
-                runtime.setDurationFromServer(screenName, durationMs);
+                runtime.setDurationFromServer(screenName, requestedUrl, durationMs);
             });
         });
     }
@@ -724,6 +729,10 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
     private boolean advancePlaylist(Screen screen) {
         Playlist playlist = Playlist.get(screen.name());
         if (playlist == null || !playlist.isEnabled() || playlist.isEmpty()) {
+            return false;
+        }
+        Playlist.PlaylistEntry currentEntry = playlist.current();
+        if (currentEntry == null || !Objects.equals(screen.mp4Url(), currentEntry.url())) {
             return false;
         }
 

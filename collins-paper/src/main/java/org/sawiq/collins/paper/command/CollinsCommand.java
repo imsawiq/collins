@@ -417,11 +417,13 @@ public final class CollinsCommand implements TabExecutor {
                 long nextMs = Math.max(0L, curMs + deltaMs);
                 
                 // Проверяем если seek дальше конца видео
-                long duration = pb.durationMs;
+                long duration = runtime.getDurationMs(s.name(), s.mp4Url());
                 if (duration > 0 && nextMs >= duration && !s.loop()) {
                     // Проверяем плейлист
                     Playlist playlist = Playlist.get(s.name());
-                    if (playlist != null && playlist.isEnabled() && !playlist.isEmpty()) {
+                    Playlist.PlaylistEntry currentEntry = playlist != null ? playlist.current() : null;
+                    if (playlist != null && playlist.isEnabled() && !playlist.isEmpty()
+                            && currentEntry != null && Objects.equals(s.mp4Url(), currentEntry.url())) {
                         Playlist.PlaylistEntry nextEntry = playlist.next();
                         if (nextEntry != null) {
                             // Переключаем на следующее видео
