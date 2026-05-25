@@ -1,6 +1,7 @@
 package org.sawiq.collins.paper.state;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class CollinsRuntimeState {
@@ -13,6 +14,7 @@ public final class CollinsRuntimeState {
         public volatile long startEpochMs = 0; // когда "пошло"
         public volatile long basePosMs = 0;    // накопленная позиция (для resume)
         public volatile long durationMs = 0;   // длительность видео
+        public volatile String durationUrl = ""; // URL, for which durationMs was probed
     }
 
     private final Map<String, Playback> playback = new ConcurrentHashMap<>();
@@ -45,7 +47,7 @@ public final class CollinsRuntimeState {
         p.startEpochMs = 0;
         p.basePosMs = 0;
         if (!keepDuration) {
-            p.durationMs = 0;
+            clearDuration(p);
         }
     }
 
@@ -58,14 +60,15 @@ public final class CollinsRuntimeState {
         p.startEpochMs = System.currentTimeMillis();
         p.basePosMs = 0;
         if (!keepDuration) {
-            p.durationMs = 0;
+            clearDuration(p);
         }
     }
 
-    public void setDurationFromServer(String screenName, long durationMs) {
-        if (durationMs > 0) {
-            get(screenName).durationMs = durationMs;
-        }
+    public void setDurationFromServer(String screenName, String url, long durationMs) {
+        if (durationMs <= 0) return;
+        Playback p = get(screenName);
+        p.durationMs = durationMs;
+        p.durationUrl = normalizeUrl(url);
     }
 
     /** Возвращает текущую позицию видео в миллисекундах */
@@ -75,15 +78,36 @@ public final class CollinsRuntimeState {
         return p.basePosMs + (System.currentTimeMillis() - p.startEpochMs);
     }
 
-    public boolean isVideoEnded(String screenName) {
+    public boolean isVideoEnded(String screenName, String url) {
         Playback p = get(screenName);
-        if (p.durationMs <= 0) return false;
+        if (!durationMatches(p, url)) return false;
         if (p.startEpochMs <= 0) return false;
         long currentPos = getCurrentPosMs(screenName);
         return currentPos >= Math.max(0L, p.durationMs - END_GRACE_MS);
     }
 
-    public long getDurationMs(String screenName) {
-        return get(screenName).durationMs;
+    public long getDurationMs(String screenName, String url) {
+        Playback p = get(screenName);
+        return durationMatches(p, url) ? p.durationMs : 0L;
+    }
+
+    public void clearDuration(String screenName) {
+        clearDuration(get(screenName));
+    }
+
+    private static void clearDuration(Playback p) {
+        p.durationMs = 0;
+        p.durationUrl = "";
+    }
+
+    private static boolean durationMatches(Playback p, String url) {
+        if (p.durationMs <= 0) return false;
+        String durationUrl = normalizeUrl(p.durationUrl);
+        if (durationUrl.isEmpty()) return false;
+        return Objects.equals(durationUrl, normalizeUrl(url));
+    }
+
+    private static String normalizeUrl(String url) {
+        return url == null ? "" : url.trim();
     }
 }
