@@ -338,12 +338,11 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
      *       SSRF / arg-injection vectors).</li>
      *   <li>The URL is in {@code FFprobeUtil}'s permanent-failure cache
      *       — yt-dlp / ffprobe both already gave up with an
-     *       unrecoverable marker (PO token gate, "Video unavailable",
+     *       unrecoverable marker ("Video unavailable",
      *       private/age-restricted, "Failed to extract any player
-     *       response", etc.). Letting the player issue {@code play}
-     *       again on the same dead link would just spin its HUD on
-     *       "preparing" while the server timeline ticks forward
-     *       feeding nothing — exactly the symptom users see today.</li>
+     *       response", etc.). YouTube bot-gates are not refused here:
+     *       the server can be blocked while client-side playback still
+     *       works from a player's own network/cookies.</li>
      * </ul>
      *
      * <p>Transient failures, never-probed URLs, and any URL that
@@ -391,10 +390,12 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
      * thread (Folia-safe).</p>
      *
      * <p>If the probe returns 0 ms (yt-dlp / ffprobe both failed) we
-     * refuse the start and tell the player. The URL is now in the
-     * failure cache, so subsequent {@code /collins play} calls hit
-     * the synchronous {@link #checkPlayableUrl(String)} path
-     * instantly without waiting for another probe.</p>
+     * refuse the start and tell the player, except for YouTube bot-gates.
+     * Those are allowed through with an unknown duration because the
+     * server-side datacenter IP may be blocked while client-side playback
+     * still works from a player's own network/cookies. The URL is now in
+     * the failure cache, so subsequent duration requests do not keep
+     * spawning yt-dlp.</p>
      *
      * <p>If the probe returns a positive duration OR yt-dlp marked
      * the URL as live, we proceed with the start and broadcast a
@@ -479,7 +480,8 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
                         ? duration
                         : durationFromCache;
 
-                if (resolvedDuration <= 0 && !live) {
+                boolean serverBotGated = FFprobeUtil.isKnownBotGated(url);
+                if (resolvedDuration <= 0 && !live && !serverBotGated) {
                     if (player.isOnline()) {
                         lang.send(player, "error.unplayable_url",
                                 lang.vars("name", name, "url", url));
@@ -489,7 +491,8 @@ public final class CollinsPaperPlugin extends JavaPlugin implements Listener {
                     return;
                 }
 
-                doStartPlaybackOnServerThread(player, current, fromZero, resolvedDuration, "probe ok");
+                doStartPlaybackOnServerThread(player, current, fromZero, resolvedDuration,
+                        serverBotGated ? "server probe bot-gated; client fallback" : "probe ok");
             });
         });
     }

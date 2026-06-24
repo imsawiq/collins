@@ -128,8 +128,106 @@ public final class YouTubeLiveClient {
             }
         }
 
+        // Last-ditch fallback: the public watch page embeds the full player
+        // response (ytInitialPlayerResponse) including hlsManifestUrl for
+        // live streams, and is NOT subject to the Innertube client-version
+        // checks that periodically break the API clients above. This keeps
+        // live playback working even when YouTube rejects every API client.
+        try {
+            String fromPage = resolveViaWatchPage(videoId);
+            if (fromPage != null) {
+                log("resolveLiveHlsUrl: success via watch page");
+                String variant = HlsVariantPicker.pick(fromPage, preferredHeight, UA_WEB_SAFARI);
+                if (variant != null && !variant.equals(fromPage)) {
+                    return variant;
+                }
+                return fromPage;
+            }
+        } catch (Exception e) {
+            dbg("resolveLiveHlsUrl: watch page fallback threw " + e.getMessage());
+        }
+
         log("resolveLiveHlsUrl: not a live stream / all clients rejected");
         return null;
+    }
+
+    /**
+     * Cheap live-status probe used by the resolver's failure paths to decide
+     * whether a video may be routed through the VOD download pipeline.
+     * Returns {@code Boolean.TRUE} if the watch page says the video is live,
+     * {@code Boolean.FALSE} if it positively says it is not, and {@code null}
+     * when the page could not be fetched/parsed (caller should stay
+     * optimistic and fall back to its existing behaviour).
+     *
+     * <p>This matters because routing a live stream into the yt-dlp VOD
+     * download path makes yt-dlp record the stream forever - the user sees
+     * an infinite "preparing video" phase that never completes.</p>
+     */
+    public static Boolean checkLiveStatus(String videoId) {
+        if (videoId == null || videoId.isBlank()) return null;
+        try {
+            String html = fetchWatchPage(videoId);
+            if (html == null || html.isBlank()) return null;
+            boolean live = html.contains("\"isLive\":true")
+                || html.contains("\"isLiveNow\":true")
+                || (html.contains("\"isLiveContent\":true") && html.contains("hlsManifestUrl"));
+            if (live) return Boolean.TRUE;
+            // Only report a confident "not live" when the player response is
+            // actually present; consent walls / bot pages must yield null.
+            if (html.contains("ytInitialPlayerResponse")) return Boolean.FALSE;
+            return null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Extracts {@code hlsManifestUrl} from the public watch page, or null. */
+    private static String resolveViaWatchPage(String videoId) throws IOException {
+        String html = fetchWatchPage(videoId);
+        if (html == null || html.isBlank()) return null;
+
+        int idx = html.indexOf("\"hlsManifestUrl\":\"");
+        if (idx < 0) return null;
+        int start = idx + "\"hlsManifestUrl\":\"".length();
+        int end = html.indexOf('"', start);
+        if (end <= start) return null;
+
+        String url = html.substring(start, end)
+            .replace("\\/", "/")
+            .replace("\\u0026", "&");
+        String lower = url.toLowerCase(Locale.ROOT);
+        if (!lower.startsWith("https://") || !lower.contains("googlevideo.com")) {
+            dbg("resolveViaWatchPage: rejected manifest url " + url);
+            return null;
+        }
+        return url;
+    }
+
+    private static String fetchWatchPage(String videoId) throws IOException {
+        HttpURLConnection conn = (HttpURLConnection) new URL(
+            "https://www.youtube.com/watch?v=" + videoId + "&hl=en").openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(8_000);
+        conn.setReadTimeout(8_000);
+        conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("User-Agent", UA_WEB_SAFARI);
+        conn.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        conn.setRequestProperty("Cookie", "CONSENT=YES+1; SOCS=CAI");
+        try {
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                dbg("fetchWatchPage: HTTP " + code);
+                return null;
+            }
+            try (InputStream in = conn.getInputStream()) {
+                // 2.5 MB is plenty: ytInitialPlayerResponse sits near the top
+                // of the document, well within the first megabyte.
+                byte[] buf = in.readNBytes(2_500_000);
+                return new String(buf, StandardCharsets.UTF_8);
+            }
+        } finally {
+            conn.disconnect();
+        }
     }
 
     /** UA the variant playlist fetch should use to match the client that produced the master. */

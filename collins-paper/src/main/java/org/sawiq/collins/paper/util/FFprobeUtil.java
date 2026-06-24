@@ -21,6 +21,8 @@ public class FFprobeUtil {
     private static final Pattern YT_DURATION_PATTERN = Pattern.compile("\"duration\"\\s*:\\s*([0-9.]+)");
     private static final Pattern IS_LIVE_PATTERN = Pattern.compile("\"is_live\"\\s*:\\s*(true|false)", Pattern.CASE_INSENSITIVE);
     private static final Pattern LIVE_STATUS_PATTERN = Pattern.compile("\"live_status\"\\s*:\\s*\"([^\"]+)\"");
+    /** First standalone numeric token in ffprobe output (defends against merged stderr). */
+    private static final Pattern FFPROBE_DURATION_NUMBER = Pattern.compile("(?m)^\\s*([0-9]+(?:\\.[0-9]+)?)\\s*$");
 
     private record ProbeResult(long durationMs, boolean live) {
     }
@@ -100,7 +102,31 @@ public class FFprobeUtil {
      * front) or just transient (so the regular checkVideoEndings loop
      * can keep watching for it to come back).
      */
-    private record FailureEntry(long expiresAtMs, boolean permanent) {
+    private record FailureEntry(long expiresAtMs, boolean permanent, boolean botGated) {
+    }
+
+    /**
+     * Substrings that specifically signal YouTube's "you're not a bot"
+     * gate, as opposed to a genuinely unavailable video. When this is the
+     * cause we want to point the admin at the cookies fix rather than tell
+     * them the video is dead - the video is fine, it's the server's
+     * datacenter IP that YouTube distrusts.
+     */
+    private static final String[] BOT_GATE_MARKERS = {
+            "sign in to confirm",
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+            "use --cookies",
+            "cookies-from-browser",
+    };
+
+    private static boolean isBotGate(String message) {
+        if (message == null || message.isEmpty()) return false;
+        String lower = message.toLowerCase(Locale.ROOT);
+        for (String marker : BOT_GATE_MARKERS) {
+            if (lower.contains(marker)) return true;
+        }
+        return false;
     }
 
     private static final Map<String, FailureEntry> FAILURE_CACHE = new ConcurrentHashMap<>();
@@ -188,6 +214,7 @@ public class FFprobeUtil {
             } catch (Exception e) {
                 String msg = e.getMessage();
                 boolean permanent = isPermanentFailure(msg);
+                boolean botGated = isBotGate(msg);
                 if (logger != null) {
                     // Log permanent failures at INFO instead of WARNING
                     // so a single dead YouTube link does not pollute the
@@ -210,7 +237,7 @@ public class FFprobeUtil {
                         evictOldestFailureEntries(FAILURE_CACHE.size() - CACHE_MAX_ENTRIES + 1);
                     }
                     long ttl = permanent ? PERMANENT_FAILURE_TTL_MS : FAILURE_CACHE_TTL_MS;
-                    FAILURE_CACHE.put(url, new FailureEntry(System.currentTimeMillis() + ttl, permanent));
+                    FAILURE_CACHE.put(url, new FailureEntry(System.currentTimeMillis() + ttl, permanent, botGated));
                 }
                 return 0L;
             }
@@ -282,15 +309,18 @@ public class FFprobeUtil {
     /**
      * Public probe: is this URL currently flagged as a permanently dead
      * link (yt-dlp / ffprobe both gave up with an unrecoverable error
-     * marker like "Sign in to confirm" / "Video unavailable" /
-     * "Failed to extract any player response")?
+     * marker like "Video unavailable" / "Failed to extract any player
+     * response")?
      *
      * <p>Used by the {@code /collins play} preflight check so we never
      * even start a server-side timeline for a URL we know we can't
      * play, instead of letting it spin forever in "preparing" on the
-     * client side. Returns {@code false} for transient failures and
-     * for URLs that have not yet been probed at all — preflight stays
-     * optimistic except where we have hard evidence.</p>
+     * client side. YouTube bot-gates are intentionally excluded: the
+     * server's datacenter IP may be blocked while a player's client-side
+     * resolver still works from their own network/cookies. Returns
+     * {@code false} for transient failures, YouTube bot-gates, and URLs
+     * that have not yet been probed at all — preflight stays optimistic
+     * except where we have hard evidence.</p>
      */
     public static boolean isKnownPermanentlyDead(String url) {
         if (url == null || url.isBlank()) return false;
@@ -300,7 +330,18 @@ public class FFprobeUtil {
             FAILURE_CACHE.remove(url);
             return false;
         }
-        return entry.permanent();
+        return entry.permanent() && !entry.botGated();
+    }
+
+    public static boolean isKnownBotGated(String url) {
+        if (url == null || url.isBlank()) return false;
+        FailureEntry entry = FAILURE_CACHE.get(url);
+        if (entry == null) return false;
+        if (System.currentTimeMillis() >= entry.expiresAtMs()) {
+            FAILURE_CACHE.remove(url);
+            return false;
+        }
+        return entry.botGated();
     }
 
     public static long getCachedDurationMs(String url) {
@@ -421,6 +462,52 @@ public class FFprobeUtil {
                 .forEach(FAILURE_CACHE::remove);
     }
 
+    /**
+     * Appends {@code --extractor-args} for YouTube URLs so the server-side
+     * yt-dlp probes are not killed by YouTube's "Sign in to confirm you're
+     * not a bot" gate (the exact error seen in
+     * "yt-dlp returned no parsable duration: ERROR: ... Sign in to confir...").
+     * {@code default} keeps yt-dlp's own client order; {@code tv_simply} and
+     * {@code android_vr} are appended because they currently require neither
+     * a PO token nor a login and are the least affected by datacenter-IP bot
+     * checks. Server admins can override the value completely by creating
+     * {@code plugins/Collins/tools/youtube.extractor_args.txt}.
+     */
+    private static void addYouTubeAntiBotArgs(java.util.List<String> command, String url) {
+        if (url == null) return;
+        String lower = url.toLowerCase(Locale.ROOT);
+        if (!lower.contains("youtube.com") && !lower.contains("youtu.be")) return;
+
+        String args = "youtube:player_client=default,tv_simply,android_vr";
+        try {
+            java.nio.file.Path override = java.nio.file.Path.of(ToolsDownloader.getYtdlpPath())
+                .getParent();
+            if (override != null) {
+                java.nio.file.Path file = override.resolve("youtube.extractor_args.txt");
+                if (java.nio.file.Files.isRegularFile(file)) {
+                    String custom = java.nio.file.Files.readString(file).trim();
+                    if (!custom.isEmpty()) args = custom;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        command.add("--extractor-args");
+        command.add(args);
+
+        // Cookies fix the bot gate definitively when the admin provides them.
+        try {
+            java.nio.file.Path toolsDir = java.nio.file.Path.of(ToolsDownloader.getYtdlpPath()).getParent();
+            if (toolsDir != null) {
+                java.nio.file.Path cookies = toolsDir.resolve("youtube.cookies.txt");
+                if (java.nio.file.Files.isRegularFile(cookies)) {
+                    command.add("--cookies");
+                    command.add(cookies.toString());
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     private static boolean isYtDlpUrl(String url) {
         if (url == null) return false;
         String lower = url.toLowerCase();
@@ -457,25 +544,56 @@ public class FFprobeUtil {
             if (resolved == null || resolved.isBlank()) {
                 throw new Exception("yt-dlp -g returned empty");
             }
+            // If `-g` handed back a live HLS manifest, do NOT ffprobe it for a
+            // duration: a live stream has no finite length, ffprobe prints a
+            // TLS/handshake error instead of a number, and the old code fed
+            // that error text straight into Double.parseDouble - which is the
+            // source of the "For input string: [tls @ ...]" crash and the
+            // spurious "no playable video" rejection of live streams. Flag it
+            // as live (durationMs=0, live=true) so the play preflight accepts
+            // it as an unbounded stream rather than refusing it.
+            if (looksLikeLiveStreamUrl(resolved)) {
+                return new ProbeResult(0L, true);
+            }
             return getDurationViaFFprobe(resolved);
         } catch (Exception fallback) {
             throw new Exception(primary.getMessage() + "; fallback failed: " + fallback.getMessage());
         }
     }
 
+    /**
+     * Heuristic: does this resolved stream URL look like a YouTube (or
+     * generic) LIVE HLS manifest? yt-dlp's {@code -g} on a live broadcast
+     * returns a googlevideo manifest whose path contains
+     * {@code yt_live_broadcast} and/or {@code /live/1/}; a generic live HLS
+     * endpoint typically ends in {@code .m3u8}. Such streams have no finite
+     * duration and must not be ffprobed for one.
+     */
+    private static boolean looksLikeLiveStreamUrl(String url) {
+        if (url == null) return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.contains("yt_live_broadcast")
+            || lower.contains("/live/1/")
+            || lower.contains("source/yt_live")
+            || lower.contains("manifest.googlevideo.com")
+            || lower.contains(".m3u8");
+    }
+
     private static String resolveStreamUrlViaYtDlp(String url) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder(
-            getYtdlpPath(),
-            "-g",
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            "--",  // end-of-options sentinel: defends against URLs that
-                   // happen to start with '-' even after isProbeSafeUrl,
-                   // e.g. a future scheme we add to the whitelist that
-                   // contains a leading dash in its hostname.
-            url
-        );
+        java.util.List<String> command = new java.util.ArrayList<>();
+        command.add(getYtdlpPath());
+        command.add("-g");
+        command.add("--no-playlist");
+        command.add("--no-warnings");
+        command.add("--quiet");
+        addYouTubeAntiBotArgs(command, url);
+        // end-of-options sentinel: defends against URLs that happen to
+        // start with '-' even after isProbeSafeUrl, e.g. a future scheme
+        // we add to the whitelist that contains a leading dash in its
+        // hostname.
+        command.add("--");
+        command.add(url);
+        ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
 
         Process process = pb.start();
@@ -507,16 +625,17 @@ public class FFprobeUtil {
     }
 
     private static ProbeResult getDurationViaYtDlp(String url) throws Exception {
-        ProcessBuilder pb = new ProcessBuilder(
-            getYtdlpPath(),
-            "--dump-single-json",
-            "--no-playlist",
-            "--no-download",
-            "--no-warnings",
-            "--quiet",
-            "--",
-            url
-        );
+        java.util.List<String> command = new java.util.ArrayList<>();
+        command.add(getYtdlpPath());
+        command.add("--dump-single-json");
+        command.add("--no-playlist");
+        command.add("--no-download");
+        command.add("--no-warnings");
+        command.add("--quiet");
+        addYouTubeAntiBotArgs(command, url);
+        command.add("--");
+        command.add(url);
+        ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         
         Process process = pb.start();
@@ -582,9 +701,21 @@ public class FFprobeUtil {
         if (result.isEmpty() || result.equals("N/A")) {
             throw new Exception("ffprobe returned no duration");
         }
-        
-        double seconds = Double.parseDouble(result);
+
+        // stderr is merged into stdout (redirectErrorStream), so on failure
+        // `result` can be an ffmpeg/TLS error line rather than a number.
+        // Pull the first numeric token instead of blindly parsing the whole
+        // string - the old Double.parseDouble(result) is what produced the
+        // "For input string: [tls @ ...]" crash on live/broken streams.
+        Matcher num = FFPROBE_DURATION_NUMBER.matcher(result);
+        if (!num.find()) {
+            throw new Exception("ffprobe returned no duration: " + shortenUrl(result));
+        }
+        double seconds = Double.parseDouble(num.group(1));
         long ms = (long) (seconds * 1000);
+        if (ms <= 0) {
+            throw new Exception("ffprobe returned non-positive duration");
+        }
 
         return new ProbeResult(ms, false);
     }

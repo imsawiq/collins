@@ -831,19 +831,30 @@ public final class VideoPlayer {
         //   3. The try-with-resources in playOnce() which closes the
         //      grabber from the SAME thread that owns it - safe.
         Thread t = thread;
-        if (t != null) {
-            t.interrupt();
-            try {
-                // Wait long enough for rw_timeout (5s) plus a small slack so
-                // any stuck network read has a chance to surface as an error
-                // and the playback thread can exit its loop cleanly.
-                t.join(6_000);
-            } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-        }
         thread = null;
         activeGrabber = null;
+        if (t != null && t != Thread.currentThread()) {
+            t.interrupt();
+            // IMPORTANT: do NOT join() here. stop() runs on the render
+            // thread (packet handlers / tickPlayback / applySync), while
+            // the playback thread can be stuck in native FFmpeg I/O for up
+            // to rw_timeout (~5s). The old synchronous join(6_000) froze
+            // the game client for several seconds on every /collins stop
+            // and /collins start. The old thread is reaped on a background
+            // daemon instead; every playback loop is guarded by `running`
+            // AND the per-session `sessionId` check, so a new session
+            // started right after this call can never be fed frames by the
+            // dying one.
+            Thread reaper = new Thread(() -> {
+                try {
+                    t.join(10_000);
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }, "Collins-VideoStopReaper");
+            reaper.setDaemon(true);
+            reaper.start();
+        }
     }
 
     private void runLoop(String url, int blocksW, int blocksH, boolean loop, int preferredYoutubeHeight, long mySessionId) {
@@ -1344,7 +1355,7 @@ public final class VideoPlayer {
                         long startSkipNs = System.nanoTime();
                         long maxSkipNs = 2_000_000_000L;
 
-                        while (running && skipped < maxSkipped) {
+                        while (running && sessionId == mySessionId && skipped < maxSkipped) {
                             if (System.nanoTime() - startSkipNs > maxSkipNs) break;
                             Frame f = grabber.grab();
                             if (f == null) break;
@@ -1398,7 +1409,7 @@ public final class VideoPlayer {
 
                 boolean ended = false;
 
-                while (running) {
+                while (running && sessionId == mySessionId) {
                     long grabStart = System.nanoTime();
                     Frame frame = grabber.grab();
                     long grabEnd = System.nanoTime();
@@ -1441,7 +1452,7 @@ public final class VideoPlayer {
                     if (!hasAnyAudio) {
                         // Р В±Р ВµР В· Р В°РЎС“Р Т‘Р С‘Р С•: Р Т‘Р ВµР С”Р С•Р Т‘Р ВµРЎР‚ Р В±Р ВµР В¶Р С‘РЎвЂљ Р С—Р С•Р С”Р В° Р В±РЎС“РЎвЂћР ВµРЎР‚ Р Р…Р Вµ Р С—Р С•Р В»Р С•Р Р…
                         // Р С—Р ВµР в„–РЎРѓР С‘Р Р…Р С– Р Т‘Р ВµР В»Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р Р…Р В° render thread
-                        while (running && !sink.canAcceptFrame()) {
+                        while (running && sessionId == mySessionId && !sink.canAcceptFrame()) {
                             // Р В±РЎС“РЎвЂћР ВµРЎР‚ Р С—Р С•Р В»Р С•Р Р… - Р В¶Р Т‘РЎвЂР С Р С—Р С•Р С”Р В° render thread Р С•РЎРѓР Р†Р С•Р В±Р С•Р Т‘Р С‘РЎвЂљ Р СР ВµРЎРѓРЎвЂљР С•
                             LockSupport.parkNanos(1_000_000L); // 1ms
                             if (Thread.interrupted()) return false;

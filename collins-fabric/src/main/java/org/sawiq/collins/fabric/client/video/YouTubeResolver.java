@@ -211,16 +211,19 @@ public final class YouTubeResolver {
     }
 
     /**
-     * BtbN ships builds for Windows, Linux x64, Linux arm64 and macOS x64.
-     * On Apple Silicon we return null so the user is told to install ffmpeg
-     * manually instead of pulling a Rosetta-only x64 build.
+     * BtbN ships builds for Windows and Linux (x64 + arm64) only - there is
+     * no macOS build in that project at all, so the old osx64 URL returned
+     * HTTP 404 on every Mac and users were forced to install ffmpeg by hand.
+     * For macOS we use Martin Riedl's static builds, which cover both
+     * Apple Silicon (arm64) and Intel (amd64) as single-binary zips.
      */
     private static String ffmpegDownloadUrl() {
         String base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-";
         return switch (HOST_OS) {
             case WINDOWS -> base + "win64-gpl.zip";
             case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "linuxarm64-gpl.tar.xz" : "linux64-gpl.tar.xz");
-            case MACOS -> HOST_ARCH == Arch.ARM64 ? null : base + "osx64-gpl.tar.xz";
+            case MACOS -> "https://ffmpeg.martin-riedl.de/redirect/latest/macos/"
+                + (HOST_ARCH == Arch.ARM64 ? "arm64" : "amd64") + "/release/ffmpeg.zip";
             case OTHER -> null;
         };
     }
@@ -564,6 +567,50 @@ public final class YouTubeResolver {
 
             if (youtube) {
                 String extractedVideoId = extractVideoId(url);
+
+                // Guard: if the watch page says this video is LIVE, the VOD
+                // download fallback below must be skipped entirely. Feeding
+                // a live stream to the yt-dlp download pipeline makes it
+                // record indefinitely and the user sees an endless
+                // "preparing video" phase. Resolve a direct live URL instead.
+                Boolean liveHint = (extractedVideoId != null && !extractedVideoId.isBlank())
+                    ? YouTubeLiveClient.checkLiveStatus(extractedVideoId)
+                    : null;
+                if (Boolean.TRUE.equals(liveHint)) {
+                    try {
+                        String directUrl = resolveDirectStreamUrl(url, targetHeight, true);
+                        dbg("resolve: metadata fallback to direct YouTube live url (live hint)");
+                        return new YouTubeResult(directUrl,
+                            extractedVideoId != null ? extractedVideoId : sourceId,
+                            0L, null, false, true);
+                    } catch (Exception directError) {
+                        dbg("resolve: live-hinted direct url failed " + directError.getMessage());
+                        return new YouTubeResult(null,
+                            extractedVideoId != null ? extractedVideoId : sourceId,
+                            0, "Live resolution failed: " + directError.getMessage(), false, true);
+                    }
+                }
+
+                // If the watch page did not give a confident live signal,
+                // still give yt-dlp's direct resolver one short chance before
+                // starting a disk download. On some YouTube live broadcasts
+                // the public page/Innertube clients are rejected, but `-g`
+                // still returns a signed live HLS manifest. Downloading that
+                // through the VOD cache path records forever and leaves the
+                // HUD stuck in "preparing".
+                try {
+                    String directUrl = resolveDirectStreamUrl(url, targetHeight, true);
+                    if (looksLikeYouTubeLiveStreamUrl(directUrl)) {
+                        dbg("resolve: metadata fallback to direct YouTube live url (manifest heuristic)");
+                        return new YouTubeResult(directUrl,
+                            extractedVideoId != null ? extractedVideoId : sourceId,
+                            0L, null, false, true);
+                    }
+                    dbg("resolve: direct YouTube url does not look live; continuing to VOD cache");
+                } catch (Exception directError) {
+                    dbg("resolve: pre-download direct YouTube live probe failed " + directError.getMessage());
+                }
+
                 if (extractedVideoId != null && !extractedVideoId.isBlank()) {
                     sourceId = extractedVideoId;
                     if (!ensureFfmpegAvailable()) {
@@ -869,6 +916,12 @@ public final class YouTubeResolver {
         command.add("--merge-output-format");
         command.add("mkv");
         command.add("--force-overwrites");
+        // Hard refusal to download live streams through the VOD pipeline:
+        // yt-dlp would otherwise record the live feed indefinitely. With
+        // the filter it skips the entry and exits quickly, which surfaces
+        // as a normal "Downloaded file not found" error to the caller.
+        command.add("--match-filters");
+        command.add("!is_live");
         command.add("--concurrent-fragments");
         command.add("4");
         command.add("--no-playlist");
@@ -1198,6 +1251,15 @@ public final class YouTubeResolver {
         if (extractorArgs != null && !extractorArgs.isBlank()) {
             command.add("--extractor-args");
             command.add(extractorArgs);
+        } else {
+            // Default client mix that minimises YouTube's "Sign in to
+            // confirm you're not a bot" gate. `default` keeps yt-dlp's own
+            // client order; tv_simply and android_vr are appended because
+            // neither currently requires a PO token or login and they are
+            // the clients least affected by datacenter-IP bot checks. Users
+            // can fully override this via youtube.extractor_args.txt.
+            command.add("--extractor-args");
+            command.add("youtube:player_client=default,tv_simply,android_vr");
         }
     }
 
@@ -1392,6 +1454,16 @@ public final class YouTubeResolver {
 
     private static String buildLiveFormatSort(int preferredHeight) {
         return "res:" + normalizeTargetHeight(preferredHeight) + ",fps";
+    }
+
+    private static boolean looksLikeYouTubeLiveStreamUrl(String url) {
+        if (url == null || url.isBlank()) return false;
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.contains("yt_live_broadcast")
+            || lower.contains("/live/1/")
+            || lower.contains("source/yt_live")
+            || (lower.contains("manifest.googlevideo.com") && lower.contains("live/1"))
+            || (lower.contains(".m3u8") && lower.contains("yt_live"));
     }
 
     private static StreamMeta parsePrintedStreamMeta(String line) {

@@ -13,6 +13,7 @@ error.invalid_url: "{prefix} &cНеверный или запрещённый UR
 error.no_url: "{prefix} &cУ экрана ещё не задан URL. Сначала используй &f/collins seturl {name} <url>&c."
 error.bad_url: "{prefix} &cСхема URL не воспроизводима. Используй http(s)/rtmp(s)/rtsp."
 error.dead_url: "{prefix} &cЭта ссылка помечена как мёртвая (приват, возраст, удалено, требует входа). Сервер отказывает в запуске. Поменяй URL через &f/collins seturl&c."
+error.youtube_bot_gate: "{prefix} &cYouTube блокирует этот сервер как автоматический трафик. Положи cookies из браузера в &ftools/youtube.cookies.txt &cили используй другую ссылку."
 error.unplayable_url: "{prefix} &cПо ссылке не нашлось видео — yt-dlp и ffprobe вернули пусто. Сервер не запускает таймер впустую. Попробуй другую ссылку."
 error.rate_limited: "{prefix} &cСлишком быстро. Повтори через &f{ms}мс&c."
 error.seek_too_large: "{prefix} &cСлишком большая перемотка. Макс: &f{max}с"

@@ -176,6 +176,26 @@ public final class ToolsDownloader {
     }
 
     private static boolean downloadFfmpeg(Path ffprobeTarget) {
+        if (HOST_OS == Os.MACOS) {
+            // BtbN ships no macOS builds, so the generic archive path below
+            // would 404. Martin Riedl's static builds cover both Apple
+            // Silicon (arm64) and Intel (amd64) as single-binary zips, one
+            // per tool, so we fetch ffprobe and ffmpeg separately.
+            boolean ok = downloadSingleBinaryZip(macosToolUrl("ffprobe"), ffprobeTarget, "ffprobe");
+            Path ffmpeg = toolsDir.resolve(ffmpegBinaryName());
+            if (!Files.isRegularFile(ffmpeg)) {
+                downloadSingleBinaryZip(macosToolUrl("ffmpeg"), ffmpeg, "ffmpeg");
+            } else {
+                ensureExecutable(ffmpeg);
+            }
+            if (ok) {
+                log("ffprobe extracted successfully");
+            } else {
+                log("ffprobe download failed; install ffmpeg via Homebrew (brew install ffmpeg) and put it on PATH.");
+            }
+            return ok;
+        }
+
         String archiveUrl = ffmpegArchiveUrl();
         if (archiveUrl == null) {
             log("No prebuilt ffmpeg available for " + HOST_OS + "/" + HOST_ARCH
@@ -401,19 +421,65 @@ public final class ToolsDownloader {
     }
 
     /**
-     * BtbN ships builds for Windows, Linux x64, Linux arm64 and macOS x64.
-     * We don't try to handle Apple Silicon yet; on arm64 macOS we tell the
-     * user to install ffmpeg via Homebrew since BtbN's macOS binary is x64
-     * only and would only work under Rosetta.
+     * BtbN ships builds for Windows and Linux (x64 + arm64) only. macOS is
+     * handled separately in {@link #downloadFfmpeg} via Martin Riedl's
+     * static single-binary builds (arm64 + amd64), so this method is never
+     * called for macOS.
      */
     private static String ffmpegArchiveUrl() {
         String base = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-";
         return switch (HOST_OS) {
             case WINDOWS -> base + "win64-gpl.zip";
             case LINUX -> base + (HOST_ARCH == Arch.ARM64 ? "linuxarm64-gpl.tar.xz" : "linux64-gpl.tar.xz");
-            case MACOS -> HOST_ARCH == Arch.ARM64 ? null : base + "osx64-gpl.tar.xz";
-            case OTHER -> null;
+            case MACOS, OTHER -> null;
         };
+    }
+
+    /** Single-binary zip download URL for macOS (Martin Riedl static builds). */
+    private static String macosToolUrl(String tool) {
+        return "https://ffmpeg.martin-riedl.de/redirect/latest/macos/"
+            + (HOST_ARCH == Arch.ARM64 ? "arm64" : "amd64") + "/release/" + tool + ".zip";
+    }
+
+    /**
+     * Downloads a zip that contains exactly one binary (Riedl macOS builds)
+     * and extracts it to {@code target}. Returns true on success.
+     */
+    private static boolean downloadSingleBinaryZip(String url, Path target, String binaryName) {
+        Path zipTmp = toolsDir.resolve(binaryName + ".zip.tmp");
+        try {
+            if (!downloadFile(url, zipTmp)) {
+                return false;
+            }
+            boolean extracted = false;
+            try (ZipInputStream zis = new ZipInputStream(Files.newInputStream(zipTmp))) {
+                ZipEntry entry;
+                while ((entry = zis.getNextEntry()) != null) {
+                    if (entry.isDirectory()) { zis.closeEntry(); continue; }
+                    String name = entry.getName();
+                    int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+                    String base = slash >= 0 ? name.substring(slash + 1) : name;
+                    if (base.equals(binaryName)) {
+                        Files.copy(zis, target, StandardCopyOption.REPLACE_EXISTING);
+                        extracted = true;
+                        break;
+                    }
+                    zis.closeEntry();
+                }
+            }
+            if (extracted) {
+                ensureExecutable(target);
+                log("Downloaded and extracted: " + target.getFileName());
+            } else {
+                log(binaryName + " not found inside " + url);
+            }
+            return extracted;
+        } catch (Exception e) {
+            log("Download/extract error for " + binaryName + ": " + e.getMessage());
+            return false;
+        } finally {
+            try { Files.deleteIfExists(zipTmp); } catch (Exception ignored) {}
+        }
     }
 
     private static Os detectOs() {
