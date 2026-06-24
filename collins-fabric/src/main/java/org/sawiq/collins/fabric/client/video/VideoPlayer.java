@@ -5,6 +5,7 @@ import org.bytedeco.javacv.FFmpegLogCallback;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.ffmpeg.global.avutil;
 import net.fabricmc.loader.api.FabricLoader;
+import org.sawiq.collins.fabric.client.config.CollinsClientConfig;
 
 import javax.sound.sampled.LineUnavailableException;
 import java.io.ByteArrayOutputStream;
@@ -15,6 +16,8 @@ import java.net.CookieManager;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.IntBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,8 +33,8 @@ import java.util.concurrent.locks.LockSupport;
 public final class VideoPlayer {
 
     /**
-     * Р СџРЎР‚Р ВµР С•Р В±РЎР‚Р В°Р В·РЎС“Р ВµРЎвЂљ Р С—РЎС“РЎвЂљРЎРЉ Р Р† РЎвЂћР С•РЎР‚Р СР В°РЎвЂљ, Р С”Р С•РЎвЂљР С•РЎР‚РЎвЂ№Р в„– FFmpeg Р СР С•Р В¶Р ВµРЎвЂљ Р С—РЎР‚Р С•РЎвЂЎР С‘РЎвЂљР В°РЎвЂљРЎРЉ.
-     * Р С™РЎРЊРЎв‚¬ РЎвЂљР ВµР С—Р ВµРЎР‚РЎРЉ РЎР‚Р В°Р В·Р СР ВµРЎвЂ°Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р Р† Р С—Р В°Р С—Р С”Р Вµ Р В±Р ВµР В· Р С”Р С‘РЎР‚Р С‘Р В»Р В»Р С‘РЎвЂ РЎвЂ№, Р С—Р С•РЎРЊРЎвЂљР С•Р СРЎС“ Р С—РЎР‚Р С•РЎРѓРЎвЂљР С• Р Р†Р С•Р В·Р Р†РЎР‚Р В°РЎвЂ°Р В°Р ВµР С Р С—РЎС“РЎвЂљРЎРЉ.
+     * Преобразует путь в формат, который FFmpeg может прочитать.
+     * Кэш теперь размещается в папке без кириллицы, поэтому просто возвращаем путь.
      */
     private static String toFFmpegPath(String path) {
         return path;
@@ -210,10 +213,10 @@ public final class VideoPlayer {
                 Files.createDirectories(dir);
 
                 Path partFile = dir.resolve(hash + ".part");
-                // Р вЂўРЎРѓР В»Р С‘ Р В·Р В°Р С–РЎР‚РЎС“Р В·Р С”Р В° Р Р† Р С—РЎР‚Р С•РЎвЂ Р ВµРЎРѓРЎРѓР Вµ (Р ВµРЎРѓРЎвЂљРЎРЉ .part РЎвЂћР В°Р в„–Р В»), Р В¶Р Т‘РЎвЂР С Р В·Р В°Р Р†Р ВµРЎР‚РЎв‚¬Р ВµР Р…Р С‘РЎРЏ
+                // Если загрузка в процессе (есть .part файл), ждём завершения
                 int waitAttempts = 0;
-                while (Files.exists(partFile) && waitAttempts < 300) { // Р СР В°Р С”РЎРѓ 5 Р СР С‘Р Р…РЎС“РЎвЂљ
-                    // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ Р ВµРЎвЂ°РЎвЂ Р В°Р С”РЎвЂљР С‘Р Р†Р Р…Р В°
+                while (Files.exists(partFile) && waitAttempts < 300) { // макс 5 минут
+                    // Проверяем что сессия ещё активна
                     if (player != null && player.sessionId != sessionId) {
                         dbg("cacheFallback: session changed while waiting, aborting");
                         return null;
@@ -233,7 +236,7 @@ public final class VideoPlayer {
                     try {
                         long sz = Files.size(existing);
                         if (sz > 0 && sz <= DISK_CACHE_MAX_BYTES) {
-                            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С Р Р†Р В°Р В»Р С‘Р Т‘Р Р…Р С•РЎРѓРЎвЂљРЎРЉ Р С”РЎРЊРЎв‚¬Р В° РЎвЂЎР ВµРЎР‚Р ВµР В· FFmpeg
+                            // Проверяем валидность кэша через FFmpeg
                             if (isValidMediaFile(existing)) {
                                 try {
                                     Files.setLastModifiedTime(existing, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis()));
@@ -242,7 +245,7 @@ public final class VideoPlayer {
                                 enforceDiskCacheLimit(dir, DISK_CACHE_MAX_BYTES);
                                 DISK_CACHE_LAST_FAIL_MS.remove(hash);
                                 dbg("cacheFallback: using valid existing file keyHash=" + hash);
-                                // Р Р€Р Р†Р ВµР Т‘Р С•Р СР В»РЎРЏР ВµР С Р С• Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·Р С•Р Р†Р В°Р Р…Р С‘Р С‘ РЎРѓРЎС“РЎвЂ°Р ВµРЎРѓРЎвЂљР Р†РЎС“РЎР‹РЎвЂ°Р ВµР С–Р С• Р С”РЎРЊРЎв‚¬Р В°
+                                // Уведомляем о использовании существующего кэша
                                 if (sink != null) {
                                     try {
                                         sink.onCachedFileUsed(existing.toString(), sz);
@@ -287,7 +290,7 @@ public final class VideoPlayer {
                     c.setInstanceFollowRedirects(false);
                     c.setRequestMethod("GET");
                     c.setConnectTimeout(15_000);
-                    c.setReadTimeout(60_000); // Р Р€Р Р†Р ВµР В»Р С‘РЎвЂЎР ВµР Р… Р Т‘Р В»РЎРЏ Р В±Р С•Р В»РЎРЉРЎв‚¬Р С‘РЎвЂ¦ РЎвЂћР В°Р в„–Р В»Р С•Р Р†
+                    c.setReadTimeout(60_000); // Увеличен для больших файлов
                     c.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
                     c.setRequestProperty("Accept", "*/*");
                     c.setRequestProperty("Accept-Encoding", "identity");
@@ -422,7 +425,7 @@ public final class VideoPlayer {
                         out.write(buf, 0, r);
                         written += r;
 
-                        // Р вЂєР С•Р С–Р С‘РЎР‚РЎС“Р ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р С”Р В°Р В¶Р Т‘РЎвЂ№Р Вµ 10 Р СљР вЂ
+                        // Логируем прогресс каждые 10 МБ
                         // Push a progress update at least once per
                         // second OR once per 16 MB written, whichever
                         // comes first. The previous "every 10 MB" gate
@@ -446,12 +449,12 @@ public final class VideoPlayer {
                                 dbg("cacheFallback: downloading... " + writtenMb + " MB");
                             }
 
-                            // Р С›РЎвЂљР С—РЎР‚Р В°Р Р†Р В»РЎРЏР ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р Р† sink
+                            // Отправляем прогресс в sink
                             if (sink != null) {
                                 sink.onDownloadProgress(Math.max(0, pct), writtenMb, Math.max(0, totalMb));
                             }
 
-                            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ Р ВµРЎвЂ°РЎвЂ Р В°Р С”РЎвЂљР С‘Р Р†Р Р…Р В°
+                            // Проверяем что сессия ещё активна
                             if (player != null && player.sessionId != sessionId) {
                                 dbg("cacheFallback: session changed during download, aborting");
                                 try {
@@ -540,37 +543,37 @@ public final class VideoPlayer {
         default void onLiveStatus(boolean live) {
         }
 
-        /** Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р С”Р С•Р С–Р Т‘Р В° Р Р…Р В°РЎвЂЎР С‘Р Р…Р В°Р ВµРЎвЂљРЎРѓРЎРЏ РЎРѓР С”Р В°РЎвЂЎР С‘Р Р†Р В°Р Р…Р С‘Р Вµ РЎвЂљРЎРЏР В¶РЎвЂР В»Р С•Р С–Р С• Р Р†Р С‘Р Т‘Р ВµР С• */
+        /** Вызывается когда начинается скачивание тяжёлого видео */
         default void onDownloadStart(String message) {
         }
 
-        /** Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ РЎРѓ Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓР С•Р С РЎРѓР С”Р В°РЎвЂЎР С‘Р Р†Р В°Р Р…Р С‘РЎРЏ (0-100) */
+        /** Вызывается с прогрессом скачивания (0-100) */
         default void onDownloadProgress(int percent, long downloadedMb, long totalMb) {
         }
 
-        /** Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р С”Р С•Р С–Р Т‘Р В° РЎРѓР С”Р В°РЎвЂЎР С‘Р Р†Р В°Р Р…Р С‘Р Вµ Р В·Р В°Р Р†Р ВµРЎР‚РЎв‚¬Р ВµР Р…Р С• */
+        /** Вызывается когда скачивание завершено */
         default void onDownloadComplete() {
         }
 
-        /** Р вЂ™РЎвЂ№Р В·РЎвЂ№Р Р†Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р С”Р С•Р С–Р Т‘Р В° Р Р†Р С‘Р Т‘Р ВµР С• Р В±РЎвЂ№Р В»Р С• РЎРѓР С”Р В°РЎвЂЎР В°Р Р…Р С• Р Р† Р С”РЎРЊРЎв‚¬ (Р Т‘Р В»РЎРЏ Р С—РЎР‚Р ВµР Т‘Р В»Р С•Р В¶Р ВµР Р…Р С‘РЎРЏ РЎС“Р Т‘Р В°Р В»Р ВµР Р…Р С‘РЎРЏ) */
+        /** Вызывается когда видео было скачано в кэш (для предложения удаления) */
         default void onCachedFileUsed(String cachedFilePath, long fileSizeBytes) {
         }
 
-        /** true Р ВµРЎРѓР В»Р С‘ Р В±РЎС“РЎвЂћР ВµРЎР‚ Р ВµРЎвЂ°РЎвЂ Р Р…Р Вµ Р С—Р С•Р В»Р С•Р Р… (Р Т‘Р ВµР С”Р С•Р Т‘Р ВµРЎР‚ Р СР С•Р В¶Р ВµРЎвЂљ Р С—РЎР‚Р С•Р Т‘Р С•Р В»Р В¶Р В°РЎвЂљРЎРЉ) */
+        /** true если буфер ещё не полон (декодер может продолжать) */
         default boolean canAcceptFrame() {
             return true;
         }
 
-        /** Р СџР С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ РЎРѓР Р†Р С•Р В±Р С•Р Т‘Р Р…РЎвЂ№Р в„– Р В±РЎС“РЎвЂћР ВµРЎР‚ Р С‘Р В· Р С—РЎС“Р В»Р В° (Р С‘Р В»Р С‘ null Р ВµРЎРѓР В»Р С‘ Р С—РЎС“Р В» Р С—РЎС“РЎРѓРЎвЂљ) */
+        /** Получить свободный буфер из пула (или null если пул пуст) */
         default int[] borrowBuffer() {
             return null;
         }
 
-        /** Р вЂ™Р ВµРЎР‚Р Р…РЎС“РЎвЂљРЎРЉ Р В±РЎС“РЎвЂћР ВµРЎР‚ Р Р† Р С—РЎС“Р В» Р С—Р С•РЎРѓР В»Р Вµ Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·Р С•Р Р†Р В°Р Р…Р С‘РЎРЏ */
+        /** Вернуть буфер в пул после использования */
         default void returnBuffer(int[] buf) {
         }
 
-        /** true Р С”Р С•Р С–Р Т‘Р В° Р В±РЎС“РЎвЂћР ВµРЎР‚ Р Р†Р С‘Р Т‘Р ВµР С• Р С–Р С•РЎвЂљР С•Р Р† (Р СР С•Р В¶Р Р…Р С• Р Р…Р В°РЎвЂЎР С‘Р Р…Р В°РЎвЂљРЎРЉ Р В°РЎС“Р Т‘Р С‘Р С•) */
+        /** true когда буфер видео готов (можно начинать аудио) */
         default boolean isBufferReady() {
             return true;
         }
@@ -579,7 +582,7 @@ public final class VideoPlayer {
     private final FrameSink sink;
 
     private volatile boolean running;
-    private volatile long sessionId; // Р Р€Р Р…Р С‘Р С”Р В°Р В»РЎРЉР Р…РЎвЂ№Р в„– ID РЎРѓР ВµРЎРѓРЎРѓР С‘Р С‘ Р Т‘Р В»РЎРЏ Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎС“Р В±Р В»Р С‘РЎР‚Р С•Р Р†Р В°Р Р…Р С‘РЎРЏ
+    private volatile long sessionId; // Р ЈР ЅР ёР єР В°Р В»ьР ЅСвЂ№Р в„– ID сР ВµссР ёР ё Р Т‘Р В»я Р В·Р В°СвЂ°Р ёСвЂљСвЂ№ Р ѕСвЂљ Р Т‘уР В±Р В»Р ёрР ѕР ІР В°Р ЅР ёя
     private Thread thread;
     /**
      * Reference to the currently-active grabber so that {@link #stop()} can
@@ -653,8 +656,8 @@ public final class VideoPlayer {
     }
 
     /**
-     * Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµРЎвЂљ, РЎРЏР Р†Р В»РЎРЏР ВµРЎвЂљРЎРѓРЎРЏ Р В»Р С‘ РЎвЂћР В°Р в„–Р В» Р Р†Р В°Р В»Р С‘Р Т‘Р Р…РЎвЂ№Р С Р СР ВµР Т‘Р С‘Р В°РЎвЂћР В°Р в„–Р В»Р С•Р С, Р С”Р С•РЎвЂљР С•РЎР‚РЎвЂ№Р в„– Р СР С•Р В¶Р ВµРЎвЂљ Р В±РЎвЂ№РЎвЂљРЎРЉ Р С•РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљ FFmpeg.
-     * Р вЂќР В»РЎРЏ MP4 Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С Р Р…Р В°Р В»Р С‘РЎвЂЎР С‘Р Вµ moov Р В°РЎвЂљР С•Р СР В° (Р В±Р ВµР В· Р Р…Р ВµР С–Р С• РЎвЂћР В°Р в„–Р В» Р Р…Р Вµ Р Р†Р С•РЎРѓР С—РЎР‚Р С•Р С‘Р В·Р Р†Р С•Р Т‘Р С‘РЎвЂљРЎРѓРЎРЏ).
+     * Проверяет, является ли файл валидным медиафайлом, который может быть открыт FFmpeg.
+     * Для MP4 проверяем наличие moov атома (без него файл не воспроизводится).
      */
     private static boolean isValidMediaFile(Path file) {
         if (file == null || !Files.isRegularFile(file)) return false;
@@ -662,7 +665,7 @@ public final class VideoPlayer {
         try {
             fileSize = Files.size(file);
             if (fileSize <= 0) return false;
-            // Р СљР С‘Р Р…Р С‘Р СР В°Р В»РЎРЉР Р…РЎвЂ№Р в„– РЎР‚Р В°Р В·Р СР ВµРЎР‚ Р Т‘Р В»РЎРЏ Р Р†Р В°Р В»Р С‘Р Т‘Р Р…Р С•Р С–Р С• mp4 РІР‚вЂќ РЎвЂ¦Р С•РЎвЂљРЎРЏ Р В±РЎвЂ№ 8KB (ftyp + moov Р СР С‘Р Р…Р С‘Р СРЎС“Р С)
+            // Минимальный размер для валидного mp4 — хотя бы 8KB (ftyp + moov минимум)
             if (fileSize < 8 * 1024) {
                 dbg("isValidMediaFile: file=" + file + " too small: " + fileSize + " bytes");
                 return false;
@@ -671,9 +674,9 @@ public final class VideoPlayer {
             return false;
         }
 
-        // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎРѓРЎвЂљРЎР‚РЎС“Р С”РЎвЂљРЎС“РЎР‚РЎС“ MP4: Р Т‘Р С•Р В»Р В¶Р ВµР Р… Р В±РЎвЂ№РЎвЂљРЎРЉ ftyp Р С‘ moov Р В°РЎвЂљР С•Р С
+        // Проверяем структуру MP4: должен быть ftyp и moov атом
         try (var raf = new java.io.RandomAccessFile(file.toFile(), "r")) {
-            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С ftyp
+            // Проверяем ftyp
             byte[] header = new byte[8];
             raf.readFully(header);
             boolean hasFtyp = header[4] == 'f' && header[5] == 't' && header[6] == 'y' && header[7] == 'p';
@@ -682,35 +685,35 @@ public final class VideoPlayer {
                 return false;
             }
 
-            // Р ВРЎвЂ°Р ВµР С moov Р В°РЎвЂљР С•Р С (Р СР С•Р В¶Р ВµРЎвЂљ Р В±РЎвЂ№РЎвЂљРЎРЉ Р Р† Р Р…Р В°РЎвЂЎР В°Р В»Р Вµ Р С‘Р В»Р С‘ Р С”Р С•Р Р…РЎвЂ Р Вµ РЎвЂћР В°Р в„–Р В»Р В°)
+            // Ищем moov атом (может быть в начале или конце файла)
             raf.seek(0);
             boolean hasMoov = false;
             long pos = 0;
             byte[] atomHeader = new byte[8];
 
-            // Р РЋР С”Р В°Р Р…Р С‘РЎР‚РЎС“Р ВµР С Р В°РЎвЂљР С•Р СРЎвЂ№ РЎвЂћР В°Р в„–Р В»Р В° (Р СР В°Р С”РЎРѓР С‘Р СРЎС“Р С 100 Р С‘РЎвЂљР ВµРЎР‚Р В°РЎвЂ Р С‘Р в„– Р Т‘Р В»РЎРЏ Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р В·Р В°РЎвЂ Р С‘Р С”Р В»Р С‘Р Р†Р В°Р Р…Р С‘РЎРЏ)
+            // Сканируем атомы файла (максимум 100 итераций для защиты от зацикливания)
             for (int i = 0; i < 100 && pos < fileSize - 8; i++) {
                 raf.seek(pos);
                 int bytesRead = raf.read(atomHeader);
                 if (bytesRead < 8) break;
 
-                // Р В Р В°Р В·Р СР ВµРЎР‚ Р В°РЎвЂљР С•Р СР В° (big-endian 32-bit)
+                // Размер атома (big-endian 32-bit)
                 long atomSize = ((atomHeader[0] & 0xFFL) << 24) |
                                ((atomHeader[1] & 0xFFL) << 16) |
                                ((atomHeader[2] & 0xFFL) << 8) |
                                (atomHeader[3] & 0xFFL);
 
-                // Р СћР С‘Р С— Р В°РЎвЂљР С•Р СР В°
+                // Тип атома
                 String atomType = new String(atomHeader, 4, 4, StandardCharsets.US_ASCII);
 
-                // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С Р Р…Р В° moov
+                // Проверяем на moov
                 if ("moov".equals(atomType)) {
                     hasMoov = true;
                     dbg("isValidMediaFile: file=" + file + " found moov at pos=" + pos + " size=" + atomSize);
                     break;
                 }
 
-                // Р В Р В°Р В·Р СР ВµРЎР‚ 0 Р С•Р В·Р Р…Р В°РЎвЂЎР В°Р ВµРЎвЂљ "Р Т‘Р С• Р С”Р С•Р Р…РЎвЂ Р В° РЎвЂћР В°Р в„–Р В»Р В°", РЎР‚Р В°Р В·Р СР ВµРЎР‚ 1 Р С•Р В·Р Р…Р В°РЎвЂЎР В°Р ВµРЎвЂљ 64-bit РЎР‚Р В°Р В·Р СР ВµРЎР‚
+                // Размер 0 означает "до конца файла", размер 1 означает 64-bit размер
                 if (atomSize == 0) {
                     break;
                 } else if (atomSize == 1) {
@@ -763,13 +766,13 @@ public final class VideoPlayer {
     }
 
     public void start(String url, int blocksW, int blocksH, boolean loop, long startPosMs, float gain, int preferredYoutubeHeight) {
-        stop(); // Р С›РЎРѓРЎвЂљР В°Р Р…Р С•Р Р†Р С”Р В° РЎРѓРЎвЂљР В°РЎР‚Р С•Р С–Р С• Р С—Р С•РЎвЂљР С•Р С”Р В°
+        stop(); // Остановка старого потока
 
         this.startPosMs = Math.max(0L, startPosMs);
         this.gain = Math.max(0f, gain);
         this.startRequestEpochMs = System.currentTimeMillis();
 
-        // Р Р€Р Р…Р С‘Р С”Р В°Р В»РЎРЉР Р…РЎвЂ№Р в„– ID РЎРѓР ВµРЎРѓРЎРѓР С‘Р С‘ Р Т‘Р В»РЎРЏ Р В·Р В°РЎвЂ°Р С‘РЎвЂљРЎвЂ№ Р С•РЎвЂљ Р Т‘РЎС“Р В±Р В»Р С‘РЎР‚Р С•Р Р†Р В°Р Р…Р С‘РЎРЏ
+        // Уникальный ID сессии для защиты от дублирования
         final long mySessionId = System.nanoTime();
         this.sessionId = mySessionId;
 
@@ -779,7 +782,7 @@ public final class VideoPlayer {
         running = true;
         thread = new Thread(() -> runLoop(urlFinal, blocksW, blocksH, loop, targetYoutubeHeight, mySessionId), "Collins-VideoPlayer");
         thread.setDaemon(true);
-        thread.setPriority(Thread.MAX_PRIORITY); // Р Р†РЎвЂ№РЎРѓР С•Р С”Р С‘Р в„– Р С—РЎР‚Р С‘Р С•РЎР‚Р С‘РЎвЂљР ВµРЎвЂљ Р Т‘Р В»РЎРЏ РЎС“Р СР ВµР Р…РЎРЉРЎв‚¬Р ВµР Р…Р С‘РЎРЏ GC Р С—Р В°РЎС“Р В·
+        thread.setPriority(Thread.MAX_PRIORITY); // высокий приоритет для уменьшения GC пауз
         thread.start();
     }
 
@@ -858,7 +861,7 @@ public final class VideoPlayer {
     }
 
     private void runLoop(String url, int blocksW, int blocksH, boolean loop, int preferredYoutubeHeight, long mySessionId) {
-        // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• РЎРЊРЎвЂљР С• Р Р…Р В°РЎв‚¬Р В° РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ
+        // Проверяем что это наша сессия
         if (sessionId != mySessionId) {
             dbg("runLoop: session mismatch, exiting");
             return;
@@ -899,13 +902,13 @@ public final class VideoPlayer {
                 }
                 failStreak = 0;
 
-                // playOnce Р Р†Р ВµРЎР‚Р Р…РЎС“Р В» true РІР‚вЂќ Р Р†Р С‘Р Т‘Р ВµР С• РЎС“РЎРѓР С—Р ВµРЎв‚¬Р Р…Р С• Р В·Р В°Р С”Р С•Р Р…РЎвЂЎР С‘Р В»Р С•РЎРѓРЎРЉ
-                // Р СњР Вµ Р С—Р ВµРЎР‚Р ВµР В·Р В°Р С—РЎС“РЎРѓР С”Р В°Р ВµР С РІР‚вЂќ VideoScreen РЎР‚Р ВµРЎв‚¬Р С‘РЎвЂљ Р Р…РЎС“Р В¶Р Р…Р С• Р В»Р С‘ Р С—Р ВµРЎР‚Р ВµР В·Р В°Р С—РЎС“РЎРѓР С”Р В°РЎвЂљРЎРЉ
+                // playOnce вернул true — видео успешно закончилось
+                // Не перезапускаем — VideoScreen решит нужно ли перезапускать
                 dbg("runLoop: playOnce completed successfully, exiting loop");
                 break;
             }
         } finally {
-            // Р С›РЎвЂЎР С‘РЎвЂ°Р В°Р ВµР С РЎвЂљР С•Р В»РЎРЉР С”Р С• Р ВµРЎРѓР В»Р С‘ РЎРЊРЎвЂљР С• Р Р…Р В°РЎв‚¬Р В° РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ
+            // Очищаем только если это наша сессия
             if (sessionId == mySessionId) {
                 currentAudio = null;
                 sink.onStop();
@@ -914,7 +917,7 @@ public final class VideoPlayer {
     }
 
     private boolean playOnce(String url, int blocksW, int blocksH, long seekMs, long requestEpochMs, int preferredYoutubeHeight, long mySessionId) {
-        // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В° РЎРѓР ВµРЎРѓРЎРѓР С‘Р С‘ Р Р† Р Р…Р В°РЎвЂЎР В°Р В»Р Вµ
+        // Проверка сессии в начале
         if (sessionId != mySessionId || !running) {
             dbg("playOnce: session mismatch or stopped, aborting");
             return false;
@@ -1002,7 +1005,7 @@ public final class VideoPlayer {
             dbg("playOnce: YouTube resolved to: " + url.substring(0, Math.min(100, url.length())) + "...");
             sink.onDownloadComplete();
             
-            // Р С›РЎвЂљР С—РЎР‚Р В°Р Р†Р В»РЎРЏР ВµР С duration Р С•РЎвЂљ yt-dlp Р Р…Р В° РЎРѓР ВµРЎР‚Р Р†Р ВµРЎР‚ (FFmpeg РЎвЂЎР В°РЎРѓРЎвЂљР С• Р Р…Р Вµ Р С—Р С•Р В»РЎС“РЎвЂЎР В°Р ВµРЎвЂљ duration Р С‘Р В· YouTube РЎРѓРЎвЂљРЎР‚Р С‘Р СР С•Р Р†)
+            // Отправляем duration от yt-dlp на сервер (FFmpeg часто не получает duration из YouTube стримов)
             if (ytResult.durationMs() > 0) {
                 dbg("playOnce: YouTube duration from yt-dlp: " + (ytResult.durationMs() / 1000) + "s");
                 sink.onDuration(ytResult.durationMs());
@@ -1028,7 +1031,7 @@ public final class VideoPlayer {
                         Path p = Path.of(cachedResolved);
                         if (Files.isRegularFile(p)) {
                             url = toFFmpegPath(cachedResolved);
-                            // Р Р€Р Р†Р ВµР Т‘Р С•Р СР В»РЎРЏР ВµР С Р С• Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·Р С•Р Р†Р В°Р Р…Р С‘Р С‘ Р С”РЎРЊРЎв‚¬Р С‘РЎР‚Р С•Р Р†Р В°Р Р…Р Р…Р С•Р С–Р С• РЎвЂћР В°Р в„–Р В»Р В°
+                            // Уведомляем о использовании кэшированного файла
                             try {
                                 long fileSize = Files.size(p);
                                 sink.onCachedFileUsed(cachedResolved, fileSize);
@@ -1232,7 +1235,7 @@ public final class VideoPlayer {
                 dbg("playOnce: local file detected, skipping HTTP probe url=" + url);
                 forceMp4Demuxer = url.toLowerCase(Locale.ROOT).endsWith(".mp4");
             }
-            // Р вЂќР С‘Р В°Р С–Р Р…Р С•РЎРѓРЎвЂљР С‘Р С”Р В° Р В»Р С•Р С”Р В°Р В»РЎРЉР Р…Р С•Р С–Р С• РЎвЂћР В°Р в„–Р В»Р В° Р С—Р ВµРЎР‚Р ВµР Т‘ FFmpeg
+            // Диагностика локального файла перед FFmpeg
             if (!url.startsWith("http://") && !url.startsWith("https://")) {
                 try {
                     Path p = Path.of(url);
@@ -1242,7 +1245,7 @@ public final class VideoPlayer {
                     dbg("playOnce: local file check path=" + url + " exists=" + exists + " size=" + size + " readable=" + readable);
 
                     if (exists && size > 0) {
-                        // Р В§Р С‘РЎвЂљР В°Р ВµР С Р С—Р ВµРЎР‚Р Р†РЎвЂ№Р Вµ Р В±Р В°Р в„–РЎвЂљРЎвЂ№ Р Т‘Р В»РЎРЏ Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р С‘
+                        // Читаем первые байты для проверки
                         try (var fis = Files.newInputStream(p)) {
                             byte[] header = new byte[8];
                             int read = fis.read(header);
@@ -1263,6 +1266,7 @@ public final class VideoPlayer {
                     }
                 }
                 applyNetOptions(meta, url, resolvedPlatformLive);
+                applyHwAccel(meta);
                 // Expose the probe grabber to stop() too. Without this, a
                 // user-initiated stop while FFmpeg is blocked inside the HLS
                 // demuxer's open phase (e.g. retrying a 403'd manifest) is
@@ -1279,14 +1283,14 @@ public final class VideoPlayer {
             } catch (Exception e) {
                 this.activeGrabber = null;
                 dbg("playOnce: FFmpeg meta failed url=" + url + " err=" + e);
-                // Р вЂўРЎРѓР В»Р С‘ РЎРЊРЎвЂљР С• Р В»Р С•Р С”Р В°Р В»РЎРЉР Р…РЎвЂ№Р в„– РЎвЂћР В°Р в„–Р В» Р С‘Р В· Р С”РЎРЊРЎв‚¬Р В° РІР‚вЂќ РЎС“Р Т‘Р В°Р В»РЎРЏР ВµР С Р ВµР С–Р С•, Р С•Р Р… Р С—Р С•Р Р†РЎР‚Р ВµР В¶Р Т‘РЎвЂР Р…
+                // Если это локальный файл из кэша вЂ” удаляем его, он повреждён
                 if (!url.startsWith("http://") && !url.startsWith("https://")) {
                     try {
                         Path badFile = Path.of(url);
                         if (Files.exists(badFile)) {
                             dbg("playOnce: deleting corrupted cache file: " + url);
                             Files.deleteIfExists(badFile);
-                            // Р Р€Р Т‘Р В°Р В»РЎРЏР ВµР С Р С‘Р В· DISK_CACHE_LAST_FAIL_MS РЎвЂЎРЎвЂљР С•Р В±РЎвЂ№ Р СР С•Р В¶Р Р…Р С• Р В±РЎвЂ№Р В»Р С• Р С—Р ВµРЎР‚Р ВµР В·Р В°Р С–РЎР‚РЎС“Р В·Р С‘РЎвЂљРЎРЉ
+                            // Удаляем из DISK_CACHE_LAST_FAIL_MS чтобы можно было перезагрузить
                             String hash = sha256Hex(originalUrl.trim());
                             DISK_CACHE_LAST_FAIL_MS.remove(hash);
                         }
@@ -1313,10 +1317,10 @@ public final class VideoPlayer {
             return false;
         }
 
-        // 2) target РЎР‚Р В°Р В·Р СР ВµРЎР‚
+        // 2) target размер
         VideoSizeUtil.Size target = VideoSizeUtil.pick(blocksW, blocksH, videoW, videoH);
 
-        // 3) Р Т‘Р ВµР С”Р С•Р Т‘
+        // 3) декод
         try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(url)) {
             if (forceMp4Demuxer) {
                 try {
@@ -1327,10 +1331,30 @@ public final class VideoPlayer {
             applyNetOptions(grabber, url, resolvedPlatformLive);
             grabber.setImageWidth(target.w());
             grabber.setImageHeight(target.h());
-            grabber.setPixelFormat(avutil.AV_PIX_FMT_BGR24);
-            grabber.start();
+            // RGBA выходит из swscale уже в порядке байт R,G,B,A. Прочитанный
+            // как little-endian int это даёт 0xAABBGGRR — ровно формат текстуры
+            // NativeImage (ABGR). Так попиксельная конверсия BGR->ABGR на CPU
+            // полностью убирается: swscale (нативный SIMD) делает её сам, а нам
+            // остаётся одно массовое копирование int-ов.
+            grabber.setPixelFormat(avutil.AV_PIX_FMT_RGBA);
+            HwAccelBackend backend = CollinsClientConfig.get().resolvedHwAccelBackend();
+            try {
+                applyHwAccel(grabber, backend);
+                grabber.start();
+            } catch (Exception hwFail) {
+                if (backend.isHardware()) {
+                    dbg("playOnce: hwaccel " + backend + " failed (" + hwFail.getMessage()
+                        + "), retrying with software decoder");
+                    try { grabber.stop(); } catch (Exception ignored) {}
+                    applyHwAccel(grabber, HwAccelBackend.NONE);
+                    grabber.start();
+                } else {
+                    throw hwFail;
+                }
+            }
             this.activeGrabber = grabber;
-            dbg("playOnce: FFmpeg started url=" + url + " target=" + target.w() + "x" + target.h() + " forceMp4=" + forceMp4Demuxer);
+            dbg("playOnce: FFmpeg started url=" + url + " target=" + target.w() + "x" + target.h()
+                + " forceMp4=" + forceMp4Demuxer + " hwaccel=" + backend);
 
             long openLagMs = (requestEpochMs > 0) ? Math.max(0L, System.currentTimeMillis() - requestEpochMs) : 0L;
             long effectiveSeekMs = resolvedPlatformLive ? 0L : (seekMs + openLagMs);
@@ -1364,7 +1388,7 @@ public final class VideoPlayer {
                             if (ts <= 0) ts = grabber.getTimestamp();
 
                             if (ts >= seekTargetUs - 50_000L) {
-                                // Р Т‘Р В°Р В»РЎРЉРЎв‚¬Р Вµ Р С—Р С•Р в„–Р Т‘Р ВµРЎвЂљ Р С•Р В±РЎвЂ№РЎвЂЎР Р…РЎвЂ№Р в„– decode loop
+                                // дальше пойдет обычный decode loop
                                 break;
                             }
 
@@ -1383,13 +1407,12 @@ public final class VideoPlayer {
                 if (fps <= 0) fps = 30.0;
             }
 
-            // Р С‘Р Р…Р С‘РЎвЂ Р С‘Р В°Р В»Р С‘Р В·Р С‘РЎР‚РЎС“Р ВµР С Р Р†Р С‘Р Т‘Р ВµР С•
+            // инициализируем видео
             sink.initVideo(videoW, videoH, target.w(), target.h(), fps);
             sink.onDuration(durationMs);
 
-            // Р С”РЎРЊРЎв‚¬ Р Т‘Р В»РЎРЏ BGR24 Р Т‘Р В°Р Р…Р Р…РЎвЂ№РЎвЂ¦ (Р Р…Р Вµ Р В±РЎС“РЎвЂћР ВµРЎР‚ Р С”Р В°Р Т‘РЎР‚Р С•Р Р† - РЎвЂљР Вµ РЎвЂљР ВµР С—Р ВµРЎР‚РЎРЉ Р Р† VideoScreen)
+            // кэш для BGR24 данных (не буфер кадров - те теперь в VideoScreen)
             final int pixels = target.w() * target.h();
-            final byte[] tmpBytes = new byte[pixels * 3];
 
             boolean hasAnyAudio = false;
             long wallStartNs = 0;
@@ -1450,16 +1473,16 @@ public final class VideoPlayer {
                     videoFrameIndex++;
 
                     if (!hasAnyAudio) {
-                        // Р В±Р ВµР В· Р В°РЎС“Р Т‘Р С‘Р С•: Р Т‘Р ВµР С”Р С•Р Т‘Р ВµРЎР‚ Р В±Р ВµР В¶Р С‘РЎвЂљ Р С—Р С•Р С”Р В° Р В±РЎС“РЎвЂћР ВµРЎР‚ Р Р…Р Вµ Р С—Р С•Р В»Р С•Р Р…
-                        // Р С—Р ВµР в„–РЎРѓР С‘Р Р…Р С– Р Т‘Р ВµР В»Р В°Р ВµРЎвЂљРЎРѓРЎРЏ Р Р…Р В° render thread
+                        // без аудио: декодер бежит пока буфер не полон
+                        // пейсинг делается на render thread
                         while (running && sessionId == mySessionId && !sink.canAcceptFrame()) {
-                            // Р В±РЎС“РЎвЂћР ВµРЎР‚ Р С—Р С•Р В»Р С•Р Р… - Р В¶Р Т‘РЎвЂР С Р С—Р С•Р С”Р В° render thread Р С•РЎРѓР Р†Р С•Р В±Р С•Р Т‘Р С‘РЎвЂљ Р СР ВµРЎРѓРЎвЂљР С•
+                            // буфер полон - ждём пока render thread освободит место
                             LockSupport.parkNanos(1_000_000L); // 1ms
                             if (Thread.interrupted()) return false;
                         }
                     }
 
-                    long convertStart = System.nanoTime(); // Р СџР С›Р РЋР вЂєР вЂў Р С—Р ВµР в„–РЎРѓР С‘Р Р…Р С–Р В°
+                    long convertStart = System.nanoTime(); // ПОСЛЕ пейсинга
 
                     int[] out = sink.borrowBuffer();
                     if (out == null) {
@@ -1480,35 +1503,35 @@ public final class VideoPlayer {
                     ByteBuffer bb = (ByteBuffer) frame.image[0];
                     if (bb == null) continue;
 
+                    // RGBA: 4 байта на пиксель, читаем little-endian как int.
+                    // Байты R,G,B,A -> int 0xAABBGGRR == формат текстуры (ABGR),
+                    // поэтому никакой попиксельной конверсии не нужно — только
+                    // массовое копирование int-ов.
                     int strideBytes = frame.imageStride;
-                    int rowBytes = w * 3;
-                    int needBytes = rowBytes * h;
+                    int rowInts = w;
+                    int rowBytes = w * 4;
                     int avail = bb.limit();
 
+                    ByteBuffer src = bb.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+
                     if (strideBytes <= 0 || strideBytes == rowBytes) {
-                        if (avail < needBytes) continue;
-                        bb.position(0);
-                        bb.get(tmpBytes, 0, needBytes);
+                        if (avail < rowBytes * h) continue;
+                        src.position(0);
+                        IntBuffer ib = src.asIntBuffer();
+                        ib.get(out, 0, pixels);
                     } else {
                         if (avail < strideBytes * h) continue;
                         for (int y = 0; y < h; y++) {
-                            bb.position(y * strideBytes);
-                            bb.get(tmpBytes, y * rowBytes, rowBytes);
+                            src.position(y * strideBytes);
+                            IntBuffer ib = src.asIntBuffer();
+                            ib.get(out, y * rowInts, rowInts);
                         }
-                    }
-
-                    // BGR24 -> ABGR (0xAABBGGRR)
-                    for (int i = 0, j = 0; i < pixels; i++, j += 3) {
-                        int b = tmpBytes[j] & 0xFF;
-                        int g = tmpBytes[j + 1] & 0xFF;
-                        int r = tmpBytes[j + 2] & 0xFF;
-                        out[i] = 0xFF000000 | (b << 16) | (g << 8) | r;
                     }
 
                     long convertEnd = System.nanoTime();
 
                     long grabUs = (grabEnd - grabStart) / 1000L;
-                    long convertUs = (convertEnd - convertStart) / 1000L; // РЎвЂљР С•Р В»РЎРЉР С”Р С• Р С”Р С•Р Р…Р Р†Р ВµРЎР‚РЎвЂљР В°РЎвЂ Р С‘РЎРЏ, Р В±Р ВµР В· Р С—Р ВµР в„–РЎРѓР С‘Р Р…Р С–Р В°
+                    long convertUs = (convertEnd - convertStart) / 1000L; // только конвертация, без пейсинга
                     if (grabUs > maxGrabUs) maxGrabUs = grabUs;
                     if (convertUs > maxConvertUs) maxConvertUs = convertUs;
 
@@ -1547,6 +1570,19 @@ public final class VideoPlayer {
         }
 
         return true;
+    }
+
+    private static void applyHwAccel(FFmpegFrameGrabber g, HwAccelBackend backend) {
+        if (backend == null || !backend.isHardware()) return;
+        try {
+            g.setOption("hwaccel", backend.ffmpegName());
+            g.setOption("hwaccel_output_format", "nv12");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private static void applyHwAccel(FFmpegFrameGrabber g) {
+        applyHwAccel(g, CollinsClientConfig.get().resolvedHwAccelBackend());
     }
 
     private static void applyNetOptions(FFmpegFrameGrabber g, String url) {
@@ -1719,8 +1755,8 @@ public final class VideoPlayer {
         String u = url.trim();
         if (!(u.startsWith("http://") || u.startsWith("https://"))) return null;
 
-        // Р СњР ВµР С”Р С•РЎвЂљР С•РЎР‚РЎвЂ№Р Вµ РЎРѓР С•Р С”РЎР‚Р В°РЎвЂ°Р В°РЎвЂљР ВµР В»Р С‘/РЎвЂ¦Р С•РЎРѓРЎвЂљР С‘Р Р…Р С–Р С‘ Р Т‘Р ВµР В»Р В°РЎР‹РЎвЂљ Р Р…Р ВµРЎРѓР С”Р С•Р В»РЎРЉР С”Р С• РЎР‚Р ВµР Т‘Р С‘РЎР‚Р ВµР С”РЎвЂљР С•Р Р†.
-        // FFmpeg РЎС“Р СР ВµР ВµРЎвЂљ РЎР‚Р ВµР Т‘Р С‘РЎР‚Р ВµР С”РЎвЂљРЎвЂ№, Р Р…Р С• Р С‘Р Р…Р С•Р С–Р Т‘Р В° Р Т‘Р С•Р В»Р С–Р С•; Р С—Р С•Р С—РЎР‚Р С•Р В±РЎС“Р ВµР С Р В±РЎвЂ№РЎРѓРЎвЂљРЎР‚Р С• Р С—Р С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ РЎвЂћР С‘Р Р…Р В°Р В»РЎРЉР Р…РЎвЂ№Р в„– URL.
+        // Некоторые сокращатели/хостинги делают несколько редиректов.
+        // FFmpeg умеет редиректы, но иногда долго; попробуем быстро получить финальный URL.
         try {
             String cur = u;
             for (int i = 0; i < 5; i++) {
@@ -1899,10 +1935,10 @@ public final class VideoPlayer {
                 Files.createDirectories(dir);
 
                 Path partFile = dir.resolve(hash + ".part");
-                // Р вЂўРЎРѓР В»Р С‘ Р В·Р В°Р С–РЎР‚РЎС“Р В·Р С”Р В° Р Р† Р С—РЎР‚Р С•РЎвЂ Р ВµРЎРѓРЎРѓР Вµ (Р ВµРЎРѓРЎвЂљРЎРЉ .part РЎвЂћР В°Р в„–Р В»), Р В¶Р Т‘РЎвЂР С Р В·Р В°Р Р†Р ВµРЎР‚РЎв‚¬Р ВµР Р…Р С‘РЎРЏ
+                // Если загрузка в процессе (есть .part файл), ждём завершения
                 int waitAttempts = 0;
-                while (Files.exists(partFile) && waitAttempts < 300) { // Р СР В°Р С”РЎРѓ 5 Р СР С‘Р Р…РЎС“РЎвЂљ
-                    // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ Р ВµРЎвЂ°РЎвЂ Р В°Р С”РЎвЂљР С‘Р Р†Р Р…Р В°
+                while (Files.exists(partFile) && waitAttempts < 300) { // макс 5 минут
+                    // Проверяем что сессия ещё активна
                     if (player != null && player.sessionId != sessionId) {
                         dbg("cache: session changed while waiting, aborting");
                         return null;
@@ -1922,7 +1958,7 @@ public final class VideoPlayer {
                     try {
                         long sz = Files.size(existing);
                         if (sz > 0 && sz <= DISK_CACHE_MAX_BYTES) {
-                            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С Р Р†Р В°Р В»Р С‘Р Т‘Р Р…Р С•РЎРѓРЎвЂљРЎРЉ Р С”РЎРЊРЎв‚¬Р В° РЎвЂЎР ВµРЎР‚Р ВµР В· FFmpeg
+                            // Проверяем валидность кэша через FFmpeg
                             if (isValidMediaFile(existing)) {
                                 try {
                                     Files.setLastModifiedTime(existing, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis()));
@@ -1931,7 +1967,7 @@ public final class VideoPlayer {
                                 enforceDiskCacheLimit(dir, DISK_CACHE_MAX_BYTES);
                                 DISK_CACHE_LAST_FAIL_MS.remove(hash);
                                 dbg("cache: using valid existing file keyHash=" + hash);
-                                // Р Р€Р Р†Р ВµР Т‘Р С•Р СР В»РЎРЏР ВµР С Р С• Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·Р С•Р Р†Р В°Р Р…Р С‘Р С‘ РЎРѓРЎС“РЎвЂ°Р ВµРЎРѓРЎвЂљР Р†РЎС“РЎР‹РЎвЂ°Р ВµР С–Р С• Р С”РЎРЊРЎв‚¬Р В°
+                                // Уведомляем о использовании существующего кэша
                                 if (sink != null) {
                                     try {
                                         sink.onCachedFileUsed(existing.toString(), sz);
@@ -1968,7 +2004,7 @@ public final class VideoPlayer {
                 c.setInstanceFollowRedirects(true);
                 c.setRequestMethod("GET");
                 c.setConnectTimeout(15_000);
-                c.setReadTimeout(60_000); // Р Р€Р Р†Р ВµР В»Р С‘РЎвЂЎР ВµР Р… Р Т‘Р В»РЎРЏ Р В±Р С•Р В»РЎРЉРЎв‚¬Р С‘РЎвЂ¦ РЎвЂћР В°Р в„–Р В»Р С•Р Р†
+                c.setReadTimeout(60_000); // Увеличен для больших файлов
                 c.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
                 c.setRequestProperty("Accept", "*/*");
                 c.setRequestProperty("Accept-Encoding", "identity");
@@ -2006,8 +2042,8 @@ public final class VideoPlayer {
                 long lastProgressNs = 0L;
                 long lastProgressBytes = 0L;
                 try (InputStream in = c.getInputStream(); OutputStream out = Files.newOutputStream(tmp)) {
-                    // Р вЂўРЎРѓР В»Р С‘ probe Р Р†Р С‘Р Т‘Р ВµР В» text/html, Р Р…Р С• Р СРЎвЂ№ Р Р†РЎРѓРЎвЂ РЎР‚Р В°Р Р†Р Р…Р С• Р С—РЎвЂ№РЎвЂљР В°Р ВµР СРЎРѓРЎРЏ Р С”РЎРЊРЎв‚¬Р С‘РЎР‚Р С•Р Р†Р В°РЎвЂљРЎРЉ РІР‚вЂќ
-                    // Р В·Р В°РЎвЂ°Р С‘РЎвЂљР С‘Р СРЎРѓРЎРЏ Р С•РЎвЂљ РЎРѓР С•РЎвЂ¦РЎР‚Р В°Р Р…Р ВµР Р…Р С‘РЎРЏ HTML-РЎРѓРЎвЂљРЎР‚Р В°Р Р…Р С‘РЎвЂ РЎвЂ№ Р Р† Р С”РЎРЊРЎв‚¬.
+                    // Если probe видел text/html, но мы всё равно пытаемся кэшировать —
+                    // защитимся от сохранения HTML-страницы в кэш.
                     boolean ctHtml = false;
                     try {
                         String baseCt = (actualCt != null) ? actualCt : pr.contentType;
@@ -2042,7 +2078,7 @@ public final class VideoPlayer {
                         out.write(buf, 0, r);
                         written += r;
 
-                        // Р вЂєР С•Р С–Р С‘РЎР‚РЎС“Р ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р С”Р В°Р В¶Р Т‘РЎвЂ№Р Вµ 10 Р СљР вЂ
+                        // Логируем прогресс каждые 10 МБ
                         // Push a progress update at least once per
                         // second OR once per 16 MB written, whichever
                         // comes first. The previous "every 10 MB" gate
@@ -2066,12 +2102,12 @@ public final class VideoPlayer {
                                 dbg("cache: downloading... " + writtenMb + " MB");
                             }
 
-                            // Р С›РЎвЂљР С—РЎР‚Р В°Р Р†Р В»РЎРЏР ВµР С Р С—РЎР‚Р С•Р С–РЎР‚Р ВµРЎРѓРЎРѓ Р Р† sink
+                            // Отправляем прогресс в sink
                             if (sink != null) {
                                 sink.onDownloadProgress(Math.max(0, pct), writtenMb, Math.max(0, totalMb));
                             }
 
-                            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• РЎРѓР ВµРЎРѓРЎРѓР С‘РЎРЏ Р ВµРЎвЂ°РЎвЂ Р В°Р С”РЎвЂљР С‘Р Р†Р Р…Р В°
+                            // Проверяем что сессия ещё активна
                             if (player != null && player.sessionId != sessionId) {
                                 dbg("cache: session changed during download, aborting");
                                 try {
@@ -2202,11 +2238,11 @@ public final class VideoPlayer {
 
     private static Path getCacheDir() {
         try {
-            // Р РЋР Р…Р В°РЎвЂЎР В°Р В»Р В° Р С—РЎР‚Р С•Р В±РЎС“Р ВµР С РЎРѓРЎвЂљР В°Р Р…Р Т‘Р В°РЎР‚РЎвЂљР Р…РЎвЂ№Р в„– Р С—РЎС“РЎвЂљРЎРЉ
+            // Сначала пробуем стандартный путь
             Path gameDir = FabricLoader.getInstance().getGameDir();
             String gameDirStr = gameDir.toString();
 
-            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С, Р ВµРЎРѓРЎвЂљРЎРЉ Р В»Р С‘ Р Р…Р Вµ-ASCII РЎРѓР С‘Р СР Р†Р С•Р В»РЎвЂ№ Р Р† Р С—РЎС“РЎвЂљР С‘ (Р С—РЎР‚Р С•Р В±Р В»Р ВµР СР В° РЎРѓ FFmpeg Р Р…Р В° Windows)
+            // Проверяем, есть ли не-ASCII символы в пути (проблема с FFmpeg на Windows)
             boolean hasNonAscii = false;
             for (int i = 0; i < gameDirStr.length(); i++) {
                 if (gameDirStr.charAt(i) > 127) {
@@ -2216,11 +2252,11 @@ public final class VideoPlayer {
             }
 
             if (hasNonAscii) {
-                // Р СњР В° Windows Р С—РЎР‚Р С•Р В±РЎС“Р ВµР С Р С—Р С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ Р С”Р С•РЎР‚Р С•РЎвЂљР С”Р С•Р Вµ Р С‘Р СРЎРЏ (8.3) РЎвЂЎР ВµРЎР‚Р ВµР В· cmd
+                // На Windows пробуем получить короткое имя (8.3) через cmd
                 String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
                 if (os.contains("win")) {
                     try {
-                        // Р СџРЎР‚Р С•Р В±РЎС“Р ВµР С Р С—Р С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ Р С”Р С•РЎР‚Р С•РЎвЂљР С”Р С‘Р в„– Р С—РЎС“РЎвЂљРЎРЉ РЎвЂЎР ВµРЎР‚Р ВµР В· cmd /c for %I
+                        // Пробуем получить короткий путь через cmd /c for %I
                         Path cacheDir = gameDir.resolve("collins-cache");
                         Files.createDirectories(cacheDir);
 
@@ -2232,7 +2268,7 @@ public final class VideoPlayer {
                         p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
 
                         if (shortPath != null && !shortPath.isBlank() && !shortPath.contains(" ") && Files.isDirectory(Path.of(shortPath))) {
-                            // Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚РЎРЏР ВµР С РЎвЂЎРЎвЂљР С• Р С”Р С•РЎР‚Р С•РЎвЂљР С”Р С‘Р в„– Р С—РЎС“РЎвЂљРЎРЉ Р Р…Р Вµ РЎРѓР С•Р Т‘Р ВµРЎР‚Р В¶Р С‘РЎвЂљ Р Р…Р Вµ-ASCII
+                            // Проверяем что короткий путь не содержит не-ASCII
                             boolean shortHasNonAscii = false;
                             for (int i = 0; i < shortPath.length(); i++) {
                                 if (shortPath.charAt(i) > 127) {
@@ -2249,14 +2285,14 @@ public final class VideoPlayer {
                         dbg("getCacheDir: failed to get short path: " + e.getMessage());
                     }
 
-                    // Fallback: Р С‘РЎРѓР С—Р С•Р В»РЎРЉР В·РЎС“Р ВµР С C:\collins-cache
+                    // Fallback: используем C:\collins-cache
                     Path fallbackDir = Path.of("C:\\collins-cache");
                     try {
                         Files.createDirectories(fallbackDir);
                         dbg("getCacheDir: using fallback dir (non-ASCII in game path): " + fallbackDir);
                         return fallbackDir;
                     } catch (Exception e) {
-                        // Fallback Р Р…Р В° TEMP
+                        // Fallback на TEMP
                         String temp = System.getenv("TEMP");
                         if (temp != null && !temp.isBlank()) {
                             Path tempDir = Path.of(temp, "collins-cache");
@@ -2340,16 +2376,16 @@ public final class VideoPlayer {
         }
     }
 
-    // ==================== Р вЂќР С‘РЎРѓР С”Р С•Р Р†РЎвЂ№Р в„– Р СР ВµР Р…Р ВµР Т‘Р В¶Р ВµРЎР‚ ====================
+    // ==================== Дисковый менеджер ====================
 
-    /** Р ВР Р…РЎвЂћР С•РЎР‚Р СР В°РЎвЂ Р С‘РЎРЏ Р С• Р С”РЎРЊРЎв‚¬Р Вµ */
+    /** Рнформация о кэше */
     public record CacheInfo(Path cacheDir, long cacheSizeBytes, int fileCount, long freeSpaceBytes) {
         public long cacheSizeMb() { return cacheSizeBytes / (1024L * 1024L); }
         public long freeSpaceMb() { return freeSpaceBytes / (1024L * 1024L); }
         public long freeSpaceGb() { return freeSpaceBytes / (1024L * 1024L * 1024L); }
     }
 
-    /** Р СџР С•Р В»РЎС“РЎвЂЎР С‘РЎвЂљРЎРЉ Р С‘Р Р…РЎвЂћР С•РЎР‚Р СР В°РЎвЂ Р С‘РЎР‹ Р С• Р С”РЎРЊРЎв‚¬Р Вµ */
+    /** Получить информацию о кэше */
     public static CacheInfo getCacheInfo() {
         try {
             Path dir = getCacheDir();

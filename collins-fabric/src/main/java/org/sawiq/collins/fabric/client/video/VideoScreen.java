@@ -48,7 +48,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     private volatile boolean ended = false;
     private volatile String endedUrl = "";
-    private volatile long endedAtMs = 0; // Р’СЂРµРјСЏ РѕРєРѕРЅС‡Р°РЅРёСЏ РґР»СЏ Р°РІС‚РѕСЃРєСЂС‹С‚РёСЏ action bar
+    private volatile long endedAtMs = 0; // Время окончания для автоскрытия action bar
 
     private volatile long lastInRadiusAtMs = 0;
     private volatile boolean pausedByRadius = false;
@@ -61,44 +61,44 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     private volatile long displayWallStartNs = 0;
     private volatile long lastHardResyncAtMs = 0;
 
-    // ===== РћС‡РµСЂРµРґСЊ РєР°РґСЂРѕРІ РґР»СЏ Р±СѓС„РµСЂРёР·Р°С†РёРё =====
+    // ===== Очередь кадров для буферизации =====
     private record InitReq(int videoW, int videoH, int targetW, int targetH, double fps) {}
     private record FrameData(int[] abgr, int w, int h, long timestampUs) {}
-    // РѕР¶РёРґР°РµРј ABGR (СЃРј. VideoPlayer), timestampUs = РїРѕР·РёС†РёСЏ РєР°РґСЂР° РІ РјРёРєСЂРѕСЃРµРєСѓРЅРґР°С…
+    // ожидаем ABGR (см. VideoPlayer), timestampUs = позиция кадра в микросекундах
 
     private final AtomicReference<InitReq> pendingInit = new AtomicReference<>(null);
     private final ConcurrentLinkedQueue<FrameData> frameQueue = new ConcurrentLinkedQueue<>();
     private final AtomicInteger frameQueueSize = new AtomicInteger(0);
     private final AtomicBoolean pendingStop = new AtomicBoolean(false);
     
-    // РїСѓР» СЃРІРѕР±РѕРґРЅС‹С… Р±СѓС„РµСЂРѕРІ - Р±СѓС„РµСЂС‹ РІРѕР·РІСЂР°С‰Р°СЋС‚СЃСЏ РїРѕСЃР»Рµ РїРѕРєР°Р·Р° РєР°РґСЂР°
+    // пул свободных буферов - буферы возвращаются после показа кадра
     private final ConcurrentLinkedQueue<int[]> freeBuffers = new ConcurrentLinkedQueue<>();
-    private static final int BUFFER_POOL_SIZE = 60; // РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ > MAX_BUFFER_FRAMES
+    private static final int BUFFER_POOL_SIZE = 60; // должен быть > MAX_BUFFER_FRAMES
     
-    // Р±СѓС„РµСЂРёР·Р°С†РёСЏ: Р¶РґС‘Рј РїРѕРєР° РЅР°РєРѕРїРёС‚СЃСЏ РјРёРЅРёРјСѓРј РєР°РґСЂРѕРІ РїРµСЂРµРґ РїРѕРєР°Р·РѕРј
-    private static final int MIN_BUFFER_FRAMES_VOD = 15; // ~0.5 СЃРµРє РїСЂРё 30fps
+    // буферизация: ждём пока накопится минимум кадров перед показом
+    private static final int MIN_BUFFER_FRAMES_VOD = 15; // ~0.5 сек при 30fps
     private static final int MIN_BUFFER_FRAMES_LIVE = 3;
-    private static final int MAX_BUFFER_FRAMES = 45; // ~1.5 СЃРµРє РјР°РєСЃРёРјСѓРј
-    private volatile boolean buffering = true; // С‚СЂСѓ РїРѕРєР° Р±СѓС„РµСЂРёР·СѓРµРј
+    private static final int MAX_BUFFER_FRAMES = 45; // ~1.5 сек максимум
+    private volatile boolean buffering = true; // тру пока буферизуем
     // ====================================================================
 
-    // РџРµР№СЃРёРЅРі РЅР° render thread
+    // Пейсинг на render thread
     private double videoFps = 30.0;
-    private volatile long playbackStartNs = 0; // РІСЂРµРјСЏ РЅР°С‡Р°Р»Р° РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёСЏ (РёР· РґРµРєРѕРґРµСЂР° РёР»Рё Р»РѕРєР°Р»СЊРЅРѕРµ)
+    private volatile long playbackStartNs = 0; // время начала воспроизведения (из декодера или локальное)
     private long framesShown = 0;
     
-    // Р”РёР°РіРЅРѕСЃС‚РёРєР°
+    // Диагностика
     private long lastUploadLogNs = 0;
     private static final long UPLOAD_LOG_INTERVAL_NS = 2_000_000_000L;
 
-    // Р”РёР°РіРЅРѕСЃС‚РёРєР° tick() - РёС‰РµРј РёСЃС‚РѕС‡РЅРёРє С„СЂРёР·РѕРІ
+    // Диагностика tick() - ищем источник фризов
     private long lastTickNs = 0;
     private long maxTickGapUs = 0;
     private long maxTickDurationUs = 0;
     private long lastTickLogNs = 0;
     private static final long TICK_LOG_INTERVAL_NS = 2_000_000_000L;
 
-    // РЎРѕСЃС‚РѕСЏРЅРёРµ СЃРєР°С‡РёРІР°РЅРёСЏ
+    // Состояние скачивания
     private volatile boolean downloading = false;
     private volatile int downloadPercent = 0;
     private volatile long downloadedMb = 0;
@@ -197,31 +197,31 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     public void tickPlayback(Vec3d playerPos, int radiusBlocks, float globalVolume, long serverNowMs) {
         long tickStart = System.nanoTime();
         
-        // РґРёР°РіРЅРѕСЃС‚РёРєР°: РІСЂРµРјСЏ РјРµР¶РґСѓ tick() Рё РІСЂРµРјСЏ РІРЅСѓС‚СЂРё tick()
+        // диагностика: время между tick() и время внутри tick()
         if (lastTickNs > 0) {
             long gapUs = (tickStart - lastTickNs) / 1000L;
             if (gapUs > maxTickGapUs) maxTickGapUs = gapUs;
         }
         
-        // 1) РїСЂРёРјРµРЅСЏРµРј РІСЃС‘, С‡С‚Рѕ РїСЂРёС€Р»Рѕ РёР· РґРµРєРѕРґРµСЂР° (РўРћР›Р¬РљРћ С‚СѓС‚)
+        // 1) применяем всё, что пришло из декодера (ТОЛЬКО тут)
         applyPendingStop();
         applyPendingInit();
 
         CollinsClientConfig cfg = CollinsClientConfig.get();
 
-        // 1.1) РµСЃР»Рё РІ РєРѕРЅС„РёРіРµ РІС‹РєР»СЋС‡РµРЅРѕ вЂ” РїРѕР»РЅРѕСЃС‚СЊСЋ РѕСЃС‚Р°РЅР°РІР»РёРІР°РµРј (Рё РІРёРґРµРѕ, Рё Р·РІСѓРє)
+        // 1.1) если в конфиге выключено — полностью останавливаем (и видео, и звук)
         if (!cfg.renderVideo) {
             stop();
             return;
         }
 
-        // 2) СѓРїСЂР°РІР»РµРЅРёРµ РІРѕСЃРїСЂРѕРёР·РІРµРґРµРЅРёРµРј
+        // 2) управление воспроизведением
         if (state.url() == null || state.url().isEmpty() || !state.playing()) {
             stop();
             return;
         }
 
-        // 2.1) hear radius: РІРЅРµ СЂР°РґРёСѓСЃР° РїРѕР»РЅРѕСЃС‚СЊСЋ РѕС‚РєР»СЋС‡Р°РµРј (Рё РІРёРґРµРѕ, Рё Р·РІСѓРє)
+        // 2.1) hear radius: вне радиуса полностью отключаем (и видео, и звук)
         boolean inRadius = isInHearRadius(playerPos, radiusBlocks);
         long nowMs = System.currentTimeMillis();
 
@@ -333,7 +333,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             player.setGain(gain);
         }
 
-        // РґРёР°РіРЅРѕСЃС‚РёРєР°: Р»РѕРі РїРёРєРѕРІС‹С… Р·РЅР°С‡РµРЅРёР№ tick
+        // диагностика: лог пиковых значений tick
         long tickEnd = System.nanoTime();
         long durationUs = (tickEnd - tickStart) / 1000L;
         if (durationUs > maxTickDurationUs) maxTickDurationUs = durationUs;
@@ -450,7 +450,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             texture.upload();
         }
 
-        // РѕС‡РµСЂРµРґСЊ РєР°РґСЂРѕРІ Рё СЃР±СЂР°СЃС‹РІР°РµРј РїРµР№СЃРёРЅРі
+        // очередь кадров и сбрасываем пейсинг
         frameQueue.clear();
         frameQueueSize.set(0);
         buffering = true;
@@ -458,7 +458,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         framesShown = 0;
         lastUploadLogNs = 0;
         
-        // РїСѓР» Р±СѓС„РµСЂРѕРІ
+        // пул буферов
         freeBuffers.clear();
         int pixels = texW * texH;
         for (int i = 0; i < BUFFER_POOL_SIZE; i++) {
@@ -469,15 +469,15 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     }
 
     /**
-     * Р‘РµСЂС‘Рј РєР°РґСЂ РёР· РѕС‡РµСЂРµРґРё СЃ РїРµР№СЃРёРЅРіРѕРј РїРѕ fps РІРёРґРµРѕ.
-     * Р‘СѓС„РµСЂРёР·Р°С†РёСЏ: Р¶РґС‘Рј РїРѕРєР° РЅР°РєРѕРїРёС‚СЃСЏ РјРёРЅРёРјСѓРј РєР°РґСЂРѕРІ РїРµСЂРµРґ РїРѕРєР°Р·РѕРј.
+     * Берём кадр из очереди с пейсингом по fps видео.
+     * Буферизация: ждём пока накопится минимум кадров перед показом.
      */
     private void uploadPendingFrameFast() {
         if (texture == null) return;
 
         int queueSize = frameQueueSize.get();
         
-        // Р‘СѓС„РµСЂРёР·Р°С†РёСЏ:
+        // Буферизация:
         if (buffering) {
             long now = System.nanoTime();
             if (now - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
@@ -485,7 +485,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
                 if (DEBUG) System.out.println("[Collins] buffering... " + queueSize + "/" + requiredBufferFrames() + " frames");
             }
             if (queueSize < requiredBufferFrames()) {
-                return; // РµС‰С‘ Р±СѓС„РµСЂРёР·СѓРµРј
+                return; // ещё буферизуем
             }
             buffering = false;
             if (playbackStartNs == 0) playbackStartNs = System.nanoTime();
@@ -532,7 +532,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         int[] abgr = frame.abgr();
         
         if (w != texW || h != texH) {
-            // Р Р°Р·РјРµСЂ РЅРµ СЃРѕРІРїР°РґР°РµС‚ - РІРѕР·РІСЂР°С‰Р°РµРј Р±СѓС„РµСЂ РІ РїСѓР» Рё РїСЂРѕРїСѓСЃРєР°РµРј
+            // Размер не совпадает - возвращаем буфер в пул и пропускаем
             freeBuffers.offer(abgr);
             return;
         }
@@ -552,7 +552,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         texture.upload();
         long end = System.nanoTime();
         
-        // Р’РђР–РќРћ: РІРѕР·РІСЂР°С‰Р°РµРј Р±СѓС„РµСЂ РІ РїСѓР» РїРѕСЃР»Рµ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ
+        // ВАЖНО: возвращаем буфер в пул после использования
         freeBuffers.offer(abgr);
 
         if (end - lastUploadLogNs >= UPLOAD_LOG_INTERVAL_NS) {
@@ -575,7 +575,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     }
 
     public long currentPosMsForDisplay(long serverNowMs) {
-        // Р’Рѕ РІСЂРµРјСЏ СЃРєР°С‡РёРІР°РЅРёСЏ РїРѕРєР°Р·С‹РІР°РµРј СЃРµСЂРІРµСЂРЅРѕРµ РІСЂРµРјСЏ (С‚Р°Р№РјР»Р°Р№РЅ РїСЂРѕРґРѕР»Р¶Р°РµС‚ РёРґС‚Рё)
+        // Во время скачивания показываем серверное время (таймлайн продолжает идти)
         if (downloading) {
             return currentVideoPosMs(serverNowMs);
         }
@@ -706,7 +706,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         }
     }
 
-    // ===== FrameSink: СЌС‚Рё РјРµС‚РѕРґС‹ РјРѕРіСѓС‚ РІС‹Р·С‹РІР°С‚СЊСЃСЏ РР— Р”Р•РљРћР”Р•Р -РџРћРўРћРљРђ =====
+    // ===== FrameSink: эти методы могут вызываться РЗ ДЕКОДЕР-ПОТОКА =====
 
     @Override
     public void initVideo(int videoW, int videoH, int targetW, int targetH, double fps) {
@@ -716,7 +716,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     @Override
     public void onDuration(long durationMs) {
         long d = Math.max(0L, durationMs);
-        // Р·Р°С‰РёС‚Р° РѕС‚ "РјСѓСЃРѕСЂРЅРѕР№" РґР»РёС‚РµР»СЊРЅРѕСЃС‚Рё (РёРЅРѕРіРґР° FFmpeg РѕС‚РґР°С‘С‚ Р°Р±СЃСѓСЂРґРЅС‹Рµ Р·РЅР°С‡РµРЅРёСЏ)
+        // защита от "мусорной" длительности (иногда FFmpeg отдаёт абсурдные значения)
         long max = 12L * 60L * 60L * 1000L;
         if (d > max) d = 0L;
         this.durationMs = d;
@@ -748,7 +748,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.displayWallStartNs = 0;
         resetDownloadState();
 
-        // РЎРµСЂРІРµСЂ СЃР°Рј РѕРїСЂРµРґРµР»СЏРµС‚ РѕРєРѕРЅС‡Р°РЅРёРµ РІРёРґРµРѕ РїРѕ РІСЂРµРјРµРЅРё (Р±РµР·РѕРїР°СЃРЅРµРµ С‡РµРј РєР»РёРµРЅС‚СЃРєРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ)
+        // Сервер сам определяет окончание видео по времени (безопаснее чем клиентское сообщение)
     }
 
     @Override
@@ -761,9 +761,9 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             return;
         }
         
-        // РћРіСЂР°РЅРёС‡РёРІР°РµРј СЂР°Р·РјРµСЂ РѕС‡РµСЂРµРґРё С‡С‚РѕР±С‹ РЅРµ СЃСЉРµСЃС‚СЊ РІСЃСЋ РїР°РјСЏС‚СЊ
+        // Ограничиваем размер очереди чтобы не съесть всю память
         if (frameQueueSize.get() >= MAX_BUFFER_FRAMES) {
-            // РћС‡РµСЂРµРґСЊ РїРѕР»РЅР° - РґРµРєРѕРґРµСЂ РґРѕР»Р¶РµРЅ Р¶РґР°С‚СЊ
+            // Очередь полна - декодер должен ждать
             freeBuffers.offer(abgr);
             return;
         }
@@ -791,7 +791,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         this.displayWallStartNs = wallStartNs;
         this.displayFrozen = false;
 
-        // Р•СЃР»Рё Р±С‹Р»Рѕ СЃРєР°С‡РёРІР°РЅРёРµ, СѓС‡РёС‚С‹РІР°РµРј РІСЂРµРјСЏ РєРѕС‚РѕСЂРѕРµ РїСЂРѕС€Р»Рѕ
+        // Если было скачивание, учитываем время которое прошло
         if (downloadStartWallMs > 0) {
             long downloadDurationMs = System.currentTimeMillis() - downloadStartWallMs;
             this.displayStartPosMs = this.displayFrozenPosMs + downloadDurationMs;
@@ -822,7 +822,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
 
     @Override
     public boolean isBufferReady() {
-        // Р‘СѓС„РµСЂ РіРѕС‚РѕРІ РєРѕРіРґР° Р±СѓС„РµСЂРёР·Р°С†РёСЏ Р·Р°РєРѕРЅС‡РµРЅР°
+        // Буфер готов когда буферизация закончена
         if (!CollinsClientConfig.get().renderVideo) return true;
         return !buffering;
     }
@@ -839,7 +839,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
             this.downloadTotalMb = 0;
             this.downloadProgressReceived = false;
 
-            // Р—Р°РїРѕРјРёРЅР°РµРј РІСЂРµРјСЏ РЅР°С‡Р°Р»Р° СЃРєР°С‡РёРІР°РЅРёСЏ РґР»СЏ РєРѕСЂСЂРµРєС‚РЅРѕР№ СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё С‚Р°Р№РјР»Р°Р№РЅР°
+            // Запоминаем время начала скачивания для корректной синхронизации таймлайна
             this.downloadStartWallMs = System.currentTimeMillis();
         }
         
@@ -890,7 +890,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         // Keep the last download status until playback clock starts.
     }
 
-    // Р“РµС‚С‚РµСЂС‹ РґР»СЏ СЃРѕСЃС‚РѕСЏРЅРёСЏ СЃРєР°С‡РёРІР°РЅРёСЏ (РґР»СЏ РѕС‚РѕР±СЂР°Р¶РµРЅРёСЏ РІ HUD)
+    // Геттеры для состояния скачивания (для отображения в HUD)
     public boolean isDownloading() { return downloading; }
     public int getDownloadPercent() { return downloadPercent; }
     public long getDownloadedMb() { return downloadedMb; }
@@ -902,7 +902,7 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
     /** @return display label of the active platform download ("YouTube" / "RuTube" / "VK"), or empty string. */
     public String getPlatformLabel() { return platformLabel; }
 
-    // РРЅС„РѕСЂРјР°С†РёСЏ Рѕ РєСЌС€РёСЂРѕРІР°РЅРЅРѕРј С„Р°Р№Р»Рµ (РґР»СЏ РїСЂРµРґР»РѕР¶РµРЅРёСЏ СѓРґР°Р»РµРЅРёСЏ)
+    // Рнформация о кэшированном файле (для предложения удаления)
     private volatile String cachedFilePath = null;
     private volatile long cachedFileSizeBytes = 0;
 
@@ -957,19 +957,19 @@ public final class VideoScreen implements VideoPlayer.FrameSink {
         return "generic";
     }
 
-    // Р“РµС‚С‚РµСЂ РґР»СЏ РїСЂРѕРІРµСЂРєРё РѕРєРѕРЅС‡Р°РЅРёСЏ РІРёРґРµРѕ (РїРѕРєР°Р·С‹РІР°С‚СЊ "РЎРµР°РЅСЃ РѕРєРѕРЅС‡РµРЅ" РІ С‚РµС‡РµРЅРёРµ 5 СЃРµРєСѓРЅРґ)
+    // Геттер для проверки окончания видео (показывать "Сеанс окончен" в течение 5 секунд)
     private static final long ENDED_DISPLAY_DURATION_MS = 5000L;
 
     public boolean isEnded() {
         if (!ended) return false;
-        // РџРѕРєР°Р·С‹РІР°РµРј "РЎРµР°РЅСЃ РѕРєРѕРЅС‡РµРЅ" С‚РѕР»СЊРєРѕ 5 СЃРµРєСѓРЅРґ
+        // Показываем "Сеанс окончен" только 5 секунд
         if (endedAtMs > 0 && System.currentTimeMillis() - endedAtMs > ENDED_DISPLAY_DURATION_MS) {
             return false;
         }
         return true;
     }
 
-    // Р’РѕР·РІСЂР°С‰Р°РµС‚ true РµСЃР»Рё РІРёРґРµРѕ Р·Р°РєРѕРЅС‡РёР»РѕСЃСЊ (Р±РµР· РѕРіСЂР°РЅРёС‡РµРЅРёСЏ РїРѕ РІСЂРµРјРµРЅРё)
+    // Возвращает true если видео закончилось (без ограничения по времени)
     public boolean hasEnded() { return ended; }
 
     public int texW() { return texW; }

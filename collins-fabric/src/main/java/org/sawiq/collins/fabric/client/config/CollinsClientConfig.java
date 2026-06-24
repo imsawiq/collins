@@ -3,6 +3,7 @@ package org.sawiq.collins.fabric.client.config;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import org.sawiq.collins.fabric.client.video.HwAccelBackend;
 import org.sawiq.collins.fabric.client.video.YouTubeQuality;
 
 import java.io.BufferedReader;
@@ -17,6 +18,8 @@ public final class CollinsClientConfig {
     public boolean renderVideo = true;
     public boolean actionbarTimeline = true;
     public int youtubeMaxQuality = YouTubeQuality.DEFAULT;
+    public boolean hardwareDecoding = true;
+    public String hwAccelBackend = HwAccelBackend.detectDefault().name();
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
     private static final String FILE_NAME = "collins.json";
@@ -81,9 +84,17 @@ public final class CollinsClientConfig {
         return Math.max(0f, Math.min(1f, localVolumePercent / 100f));
     }
 
+    public HwAccelBackend resolvedHwAccelBackend() {
+        if (!hardwareDecoding) return HwAccelBackend.NONE;
+        return HwAccelBackend.fromString(hwAccelBackend);
+    }
+
     private static void sanitize(CollinsClientConfig cfg) {
         if (cfg.localVolumePercent < 0) cfg.localVolumePercent = 0;
         if (cfg.localVolumePercent > 100) cfg.localVolumePercent = 100;
         cfg.youtubeMaxQuality = YouTubeQuality.sanitize(cfg.youtubeMaxQuality, YouTubeQuality.DEFAULT);
+        if (cfg.hwAccelBackend == null || cfg.hwAccelBackend.isBlank()) {
+            cfg.hwAccelBackend = HwAccelBackend.detectDefault().name();
+        }
     }
 }
